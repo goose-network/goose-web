@@ -1,0 +1,46 @@
+# nginx config template for goose-web.
+#
+# The stock nginx image's entrypoint runs envsubst over files in
+# /etc/nginx/templates/*.template (suffix stripped) with the variables listed
+# in NGINX_ENVSUBST_* — see the Dockerfile. Only ${GOOSE_API_URL} is
+# substituted; every other $-token below is nginx runtime syntax and must
+# survive untouched.
+#
+# /api is reverse-proxied to the goose admin API (GOOSE_API_URL, default
+# http://host.docker.internal:9090 — set it at container start with
+#   docker run -e GOOSE_API_URL=http://goose:9090 ...
+# ). The admin API sets no CORS headers, so serving the SPA and the API from
+# one origin is the supported deployment.
+#
+# An empty GOOSE_API_URL keeps the literal default: envsubst leaves variables
+# it has no value for as-is, which also means an unset variable does not
+# blank out the proxy target.
+
+server {
+    listen 8080;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # SPA routing: unknown paths fall back to index.html.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Reverse-proxy the admin API.
+    location /api/ {
+        proxy_pass ${GOOSE_API_URL};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Hashed build assets are immutable.
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+}

@@ -44,14 +44,50 @@ serving the API under the same origin.
 npm run build      # tsc -b && vite build -> dist/
 npm run preview    # serve the production build locally
 npm test           # vitest (pure helpers: formatting, bucketing, bar folding)
+npm run e2e        # Playwright against a running stack (see below)
+```
+
+## End-to-end tests
+
+`e2e/run-e2e.mjs` drives the real UI in headless Chromium against a live
+engine: connection banner, config-sourced inbound listing, inbound
+create/delete through the UI, the engine config form, and the metrics
+dashboard. It expects:
+
+- the app built and served (`npm run build && npm run preview`, port 4173)
+- a goose engine whose admin API is reachable **through the app's `/api`
+  proxy** (in dev/preview Vite handles this), and an HTTP inbound on
+  `127.0.0.1:18080` for the metrics test's proxied request
+
+```sh
+GOOSE_API_URL=http://127.0.0.1:9090 npx vite preview --port 4173 &
+E2E_BASE_URL=http://127.0.0.1:4173 node e2e/run-e2e.mjs
+```
+
+CI runs the same thing: it builds the engine from the goose repo, starts
+it with a fixed config, serves the built app, and runs the script. The
+script imports `playwright-core` and uses whatever Chromium Playwright
+has installed (`npx playwright install chromium` if none).
+
+## Container image
+
+`Dockerfile` builds the SPA (node:22-alpine) and serves it with nginx
+(`nginx.conf`) on port 8080. nginx proxies `/api` to the engine —
+`GOOSE_API_URL`, default `http://127.0.0.1:9090` — and falls back to
+`index.html` for SPA routes, so the container works with an empty
+base-URL connection (same origin). CI builds, smoke-tests, and pushes
+the image to `ghcr.io/goose-network/goose-web` on every push to main.
+
+```sh
+docker run -p 8080:8080 -e GOOSE_API_URL=http://host.docker.internal:9090 \
+  ghcr.io/goose-network/goose-web:latest
 ```
 
 ## Layout
 
-| Path                  | What it shows / edits                                     |
+| Path                  | What it shows / edits                                       |
 | --------------------- | --------------------------------------------------------- |
-| `/` (Overview)        | engine status summary                                      |
-| `/engine`             | engine config (log level, metrics window, admin auth, ...) |
+| `/` (Overview)        | engine config (network stack, metrics DB, admin auth, ...)  |
 | `/inbounds`           | HTTP/SOCKS5 listeners CRUD                                 |
 | `/outbounds`          | outbound protocol plugins CRUD                             |
 | `/pools`              | pools (outbound sets + filters + selector) CRUD             |
