@@ -1,0 +1,369 @@
+/* src/styles.css — app chrome: layout, tables, forms, cards.
+   Chart-specific styling lives with the chart components; this file is the
+   management-UI shell around them. */
+
+.viz-root {
+  min-height: 100vh;
+  background: var(--page);
+  color: var(--text-primary);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+a {
+  color: var(--series-1);
+}
+
+/* --- shell --- */
+
+.app {
+  display: flex;
+  min-height: 100vh;
+}
+
+.sidebar {
+  width: 200px;
+  flex-shrink: 0;
+  padding: 16px 12px;
+  border-right: 1px solid var(--border);
+  background: var(--surface-1);
+}
+
+.sidebar h1 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 4px 8px 16px;
+  letter-spacing: 0.02em;
+}
+
+.sidebar nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar nav a {
+  display: block;
+  padding: 6px 10px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  text-decoration: none;
+}
+
+.sidebar nav a:hover {
+  background: var(--grid);
+  color: var(--text-primary);
+}
+
+.sidebar nav a.active {
+  background: var(--grid);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.main {
+  flex: 1;
+  min-width: 0;
+  padding: 20px 24px 48px;
+  max-width: 1100px;
+}
+
+.page-title {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0 0 4px;
+}
+
+.page-sub {
+  color: var(--text-secondary);
+  margin: 0 0 20px;
+}
+
+/* --- connection banner --- */
+
+.conn-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  margin-bottom: 20px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-1);
+  font-size: 13px;
+}
+
+.conn-banner form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.conn-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-muted);
+}
+
+.conn-dot.ok {
+  background: var(--status-good);
+}
+
+.conn-dot.bad {
+  background: var(--status-critical);
+}
+
+.conn-msg {
+  color: var(--text-secondary);
+  min-width: 120px;
+}
+
+/* --- cards / panels --- */
+
+.card {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 18px;
+  margin-bottom: 20px;
+}
+
+.card h2 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 12px;
+}
+
+/* --- tables --- */
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+table.data th {
+  text-align: left;
+  color: var(--text-muted);
+  font-weight: 500;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--baseline);
+  white-space: nowrap;
+}
+
+table.data td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--grid);
+  vertical-align: top;
+}
+
+table.data td.num,
+table.data th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+table.data tr:hover td {
+  background: var(--surface-2);
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+/* --- pills --- */
+
+.pill {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 99px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  background: var(--surface-2);
+  white-space: nowrap;
+}
+
+.pill.ok {
+  color: var(--status-good-text);
+  border-color: var(--status-good);
+}
+
+.pill.fail {
+  color: var(--status-critical);
+  border-color: var(--status-critical);
+}
+
+/* --- forms --- */
+
+input[type="text"],
+input[type="password"],
+input[type="number"],
+select,
+textarea {
+  background: var(--surface-2);
+  color: var(--text-primary);
+  border: 1px solid var(--baseline);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 13px;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: 2px solid var(--series-1);
+  outline-offset: 0;
+  border-color: var(--series-1);
+}
+
+label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 2px;
+}
+
+.field {
+  margin-bottom: 10px;
+}
+
+.row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.row > * {
+  flex: 1;
+  min-width: 140px;
+}
+
+button {
+  font: inherit;
+  font-size: 13px;
+  padding: 5px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--baseline);
+  background: var(--surface-2);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: var(--text-secondary);
+}
+
+button.primary {
+  background: var(--series-1);
+  border-color: var(--series-1);
+  color: #ffffff;
+}
+
+button.primary:hover {
+  filter: brightness(1.08);
+}
+
+button.danger {
+  color: var(--status-critical);
+}
+
+button.danger:hover {
+  border-color: var(--status-critical);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.toolbar .spacer {
+  flex: 1;
+}
+
+.error-box {
+  border: 1px solid var(--status-critical);
+  color: var(--status-critical);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-bottom: 14px;
+  font-size: 13px;
+}
+
+.loading {
+  color: var(--text-muted);
+  padding: 20px 0;
+}
+
+.empty {
+  color: var(--text-muted);
+  padding: 24px 0;
+  text-align: center;
+}
+
+/* users editor (inbound form) */
+.user-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.user-row input {
+  width: 140px;
+}
+
+.user-row .chain-input {
+  flex: 1;
+}
+
+.arr-editor {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 10px;
+}
+
+.arr-editor .item-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.arr-editor .item-row input:first-child {
+  flex: 1;
+}
+
+.kv-editor .item-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.kv-editor .item-row input {
+  flex: 1;
+}

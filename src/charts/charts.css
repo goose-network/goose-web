@@ -1,0 +1,184 @@
+/* Chart chrome: figures, legends, tooltips, stat tiles, chart tables.
+   Complements styles.css; keep chart styling here so management-UI changes
+   can't drift the chart specs. */
+
+.chart-figure {
+  margin: 0 0 8px;
+}
+
+.chart-figure figcaption {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+
+.chart-legend {
+  display: flex;
+  gap: 12px;
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--text-secondary);
+  flex-wrap: wrap;
+}
+
+.chart-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.chart-key {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.axis-text {
+  font-size: 11px;
+  fill: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.axis-text.strong {
+  fill: var(--text-primary);
+  font-weight: 600;
+}
+
+.chart-hit {
+  cursor: default;
+  outline: none;
+}
+
+.chart-hit:focus-visible rect {
+  stroke: var(--series-1);
+  stroke-width: 2;
+}
+
+.chart-tooltip {
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-top: 6px;
+  max-width: 320px;
+}
+
+.chart-tooltip-title {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.chart-tooltip-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  padding: 1px 0;
+}
+
+.chart-tooltip-name {
+  color: var(--text-secondary);
+  flex: 1;
+}
+
+.chart-tooltip-val {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-table {
+  margin-top: 8px;
+}
+
+.chart-table summary {
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.chart-table summary:hover {
+  color: var(--text-secondary);
+}
+
+.chart-table .table-wrap {
+  margin-top: 6px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+/* stat tiles / KPI row */
+
+.kpi-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+
+.stat-tile {
+  flex: 1;
+  min-width: 150px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 16px;
+}
+
+.stat-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 2px;
+}
+
+.stat-value {
+  font-size: 28px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.stat-delta {
+  font-size: 12px;
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-delta.good {
+  color: var(--status-good-text);
+}
+
+.stat-delta.bad {
+  color: var(--status-critical);
+}
+
+.stat-spark {
+  width: 100%;
+  height: 28px;
+  margin-top: 6px;
+  display: block;
+}
+
+/* metrics filter row: one row, above the charts it scopes */
+
+.metrics-filters {
+  display: flex;
+  align-items: end;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.metrics-filters label {
+  margin: 0;
+}
+
+.metrics-filters .spacer {
+  flex: 1;
+}
