@@ -184,6 +184,15 @@ table.data tr:hover td {
   font-size: 12px;
 }
 
+/* Truncate long single-value cells (e.g. subscription URLs) with a
+   hover-visible full value. */
+td.ellipsis {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* --- pills --- */
 
 .pill {

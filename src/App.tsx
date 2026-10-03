@@ -7,6 +7,7 @@ import { InboundsPage } from "./pages/InboundsPage";
 import { OutboundsPage } from "./pages/OutboundsPage";
 import { PoolsPage } from "./pages/PoolsPage";
 import { ChainsPage } from "./pages/ChainsPage";
+import { ProvidersPage } from "./pages/ProvidersPage";
 import { MetricsPage } from "./pages/MetricsPage";
 
 export function App() {
@@ -22,6 +23,7 @@ export function App() {
           <NavLink to="/outbounds">Outbounds</NavLink>
           <NavLink to="/pools">Pools</NavLink>
           <NavLink to="/chains">Chains</NavLink>
+          <NavLink to="/providers">Providers</NavLink>
           <NavLink to="/metrics">Metrics</NavLink>
         </nav>
       </aside>
@@ -33,6 +35,7 @@ export function App() {
           <Route path="/outbounds" element={<OutboundsPage />} />
           <Route path="/pools" element={<PoolsPage />} />
           <Route path="/chains" element={<ChainsPage />} />
+          <Route path="/providers" element={<ProvidersPage />} />
           <Route path="/metrics" element={<MetricsPage />} />
         </Routes>
       </main>

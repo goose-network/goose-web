@@ -92,6 +92,7 @@ docker run -p 8080:8080 -e GOOSE_API_URL=http://host.docker.internal:9090 \
 | `/outbounds`          | outbound protocol plugins CRUD                             |
 | `/pools`              | pools (outbound sets + filters + selector) CRUD             |
 | `/chains`            | request chains (pool layers) CRUD                          |
+| `/providers`          | dynamic outbound providers CRUD (subscription links feed a managed pool) |
 | `/metrics`            | request dashboard: KPI tiles, volume/latency trends, per-inbound volume, top targets, raw table |
 
 | File                       | Role                                                |

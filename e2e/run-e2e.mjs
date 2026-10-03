@@ -91,6 +91,34 @@ await test("engine config form is live on the overview", async () => {
   assert.ok(listen.length > 0, "admin api listen input empty");
 });
 
+await test("create + delete a subscription provider through the UI", async () => {
+  await page.goto(`${BASE}/providers`, { waitUntil: "networkidle" });
+  const id = `e2e-sub-${Date.now()}`;
+  await page.click("button:has-text('New provider')");
+  await page.locator("#prov-id").fill(id);
+  await page.locator("#prov-pool").fill(`pool-${id}`);
+  await page.locator("#prov-url").fill("http://127.0.0.1:18080/example.com/");
+  await page.click("button:has-text('Save')");
+  await page.waitForSelector(`tr:has-text('${id}')`, { timeout: 5_000 });
+  const after = await api("providers");
+  assert.ok(
+    after.some((p) => p.id === id && p.pool_id === `pool-${id}`),
+    "created provider missing from engine",
+  );
+
+  // Delete it again through the row's delete control.
+  await page.locator(`tr:has-text('${id}') button.danger`).click();
+  await page.waitForSelector(`tr:has-text('${id}')`, {
+    state: "detached",
+    timeout: 5_000,
+  });
+  const final = await api("providers");
+  assert.ok(
+    !final.some((p) => p.id === id),
+    "deleted provider still present on engine",
+  );
+});
+
 await test("metrics page renders the dashboard", async () => {
   // Drive one proxied request through the engine first so metrics exist.
   // The engine's HTTP inbound rewrites the request to an absolute-form
