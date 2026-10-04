@@ -7,7 +7,29 @@ import { KvEditor } from "../components/KvEditor";
 import type { OutboundSpec } from "@goose-network/goose-sdk";
 
 // Protocols registered by the engine's plugin set (include/register.go).
-const PROTOCOLS = ["direct", "http", "socks5", "psiphon"] as const;
+// mihomo-*/singbox-* outbounds are normally created by their provider
+// plugins from a subscription, but manual creation stays possible.
+const PROTOCOLS = [
+  "direct",
+  "http",
+  "socks5",
+  "psiphon",
+  "mihomo-ss",
+  "mihomo-vmess",
+  "mihomo-vless",
+  "mihomo-trojan",
+  "mihomo-socks5",
+  "mihomo-http",
+  "singbox-socks",
+  "singbox-http",
+  "singbox-shadowsocks",
+  "singbox-vmess",
+  "singbox-vless",
+  "singbox-trojan",
+  "singbox-snell",
+  "singbox-ssh",
+  "singbox-anytls",
+] as const;
 
 export function OutboundsPage() {
   return (

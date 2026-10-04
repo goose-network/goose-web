@@ -11,7 +11,7 @@
     "e2e": "node e2e/run-e2e.mjs"
   },
   "dependencies": {
-    "@goose-network/goose-sdk": "github:goose-network/goose-sdk-ts#9d12442",
+    "@goose-network/goose-sdk": "github:goose-network/goose-sdk-ts#7096958",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-router-dom": "^7.3.0"

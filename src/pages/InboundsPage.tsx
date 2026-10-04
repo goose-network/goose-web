@@ -4,10 +4,15 @@ import { useState } from "react";
 import { useSdk } from "../sdk";
 import { errMessage, useAsync } from "../useAsync";
 import { StringList } from "../components/StringList";
+import { KvEditor } from "../components/KvEditor";
 import type { Inbound } from "@goose-network/goose-sdk";
 import type { components } from "@goose-network/goose-sdk";
+import type { FilterSpec } from "./poolTypes";
 
 type User = components["schemas"]["config.User"];
+type Policy = components["schemas"]["config.InboundPolicy"];
+
+const FILTERS = ["location", "latency", "protocol"] as const;
 
 export function InboundsPage() {
   return (
@@ -135,7 +140,13 @@ function InboundRow({
       </td>
       <td className="mono">{inb.listen}</td>
       <td>{users.length === 0 ? "no auth" : users.length}</td>
-      <td className="mono">{inb.policy?.chain_id || "—"}</td>
+      <td className="mono">
+        {inb.policy?.chain_id || inb.policy?.pool_id
+          ? inb.policy.chain_id
+            ? `chain ${inb.policy.chain_id}`
+            : `pool ${inb.policy.pool_id}`
+          : "any"}
+      </td>
       <td>
         <button onClick={onEdit}>Edit</button>{" "}
         <button className="danger" onClick={onDelete}>
@@ -155,6 +166,16 @@ function InboundForm({
 }) {
   const users = draft.users ?? [];
   const set = (patch: Partial<Inbound>) => setDraft({ ...draft, ...patch });
+  const policy = draft.policy ?? {};
+  const filters = policy.filters ?? [];
+  const setPolicy = (patch: Partial<Policy>) =>
+    set({ policy: { ...policy, ...patch } });
+
+  const setFilter = (i: number, patch: Partial<FilterSpec>) => {
+    const next = [...filters];
+    next[i] = { ...next[i]!, ...patch };
+    setPolicy({ filters: next });
+  };
 
   const setUser = (i: number, patch: Partial<User>) => {
     const next = [...users];
@@ -200,12 +221,76 @@ function InboundForm({
           <input
             id="inb-chain"
             type="text"
-            value={draft.policy?.chain_id ?? ""}
+            value={policy.chain_id ?? ""}
             placeholder="chain id (optional)"
-            onChange={(e) =>
-              set({ policy: { ...(draft.policy ?? {}), chain_id: e.target.value } })
-            }
+            onChange={(e) => setPolicy({ chain_id: e.target.value })}
           />
+        </div>
+        <div className="field">
+          <label htmlFor="inb-pool">Pool</label>
+          <input
+            id="inb-pool"
+            type="text"
+            value={policy.pool_id ?? ""}
+            placeholder="pool id (optional)"
+            onChange={(e) => setPolicy({ pool_id: e.target.value })}
+          />
+        </div>
+      </div>
+
+      <div className="field">
+        <label>
+          Policy filters (narrow the pool for this inbound; ignored for chain
+          routing)
+        </label>
+        <div className="arr-editor">
+          {filters.map((f, i) => (
+            <div className="filter-row" key={i} style={{ marginBottom: 10 }}>
+              <div className="row">
+                <div className="field">
+                  <label htmlFor={`inb-filter-type-${i}`}>Type</label>
+                  <select
+                    id={`inb-filter-type-${i}`}
+                    value={f.type ?? "location"}
+                    onChange={(e) => setFilter(i, { type: e.target.value })}
+                  >
+                    {FILTERS.map((t) => (
+                      <option key={t} value={t}>
+                        {t}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="field" style={{ flex: 2 }}>
+                  <KvEditor
+                    id={`inb-filter-params-${i}`}
+                    label="Params (JSON)"
+                    value={f.params}
+                    onChange={(params) => setFilter(i, { params })}
+                  />
+                </div>
+                <button
+                  type="button"
+                  className="danger"
+                  onClick={() =>
+                    setPolicy({ filters: filters.filter((_, j) => j !== i) })
+                  }
+                >
+                  Remove
+                </button>
+              </div>
+            </div>
+          ))}
+          <button
+            type="button"
+            onClick={() =>
+              setPolicy({
+                filters: [...filters, { type: "location", params: {} }],
+              })
+            }
+          >
+            Add policy filter
+          </button>
         </div>
       </div>
 
@@ -245,6 +330,18 @@ function InboundForm({
               })
             }
           />
+          <input
+            type="text"
+            className="chain-input"
+            aria-label={`Per-user pool for ${u.username || `user ${i + 1}`}`}
+            placeholder="per-user pool (optional)"
+            value={u.policy?.pool_id ?? ""}
+            onChange={(e) =>
+              setUser(i, {
+                policy: { ...(u.policy ?? {}), pool_id: e.target.value },
+              })
+            }
+          />
         </div>
       ))}
     </>
@@ -257,7 +354,14 @@ function normalize(inb: Inbound): Inbound {
     users: (inb.users ?? []).map((u) => ({
       username: u.username ?? "",
       password: u.password ?? "",
+      policy: u.policy ?? {},
     })),
-    policy: inb.policy ?? {},
+    policy: {
+      ...(inb.policy ?? {}),
+      filters: (inb.policy?.filters ?? []).map((f) => ({
+        ...f,
+        params: f.params ?? {},
+      })),
+    },
   };
 }

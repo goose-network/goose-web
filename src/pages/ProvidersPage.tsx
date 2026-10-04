@@ -144,7 +144,7 @@ function ProviderRow({
       <td>
         <span className="pill">{provider.provider ?? ""}</span>
       </td>
-      <td className="mono">{provider.pool_id}</td>
+      <td className="mono">{provider.pool_id || "default"}</td>
       <td className="mono ellipsis">{url || "—"}</td>
       <td>
         <button onClick={onEdit}>Edit</button>{" "}
@@ -187,6 +187,8 @@ function ProviderForm({
         >
           <option value="subscription">subscription</option>
           <option value="psiphon">psiphon</option>
+          <option value="mihomo">mihomo</option>
+          <option value="singbox">singbox</option>
         </select>
       </div>
       <div className="field">
@@ -195,7 +197,7 @@ function ProviderForm({
           id="prov-pool"
           type="text"
           value={draft.pool_id ?? ""}
-          placeholder="pool the proxies land in"
+          placeholder="defaults to the “default” pool"
           onChange={(e) => set({ pool_id: e.target.value })}
         />
       </div>
