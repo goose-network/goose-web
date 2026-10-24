@@ -51,20 +51,21 @@ jobs:
           go-version-file: goose-engine/go.mod
 
       - name: Build the goose engine binary
+        env:
+          # openrung-go (one of goose's replace-pinned deps) is a private
+          # repo: fetch it via authenticated git, not the module proxy.
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-          # The sibling-repo replace directives in goose's go.mod don't exist
-          # on a runner; re-point them at the published GitHub repos, pinned
-          # to the same pseudo-versions goose's own CI uses.
+          # The sibling-repo replace directives in goose's go.mod don't
+          # exist on a runner. goose's scripts/pin-replacements.sh re-points
+          # them at the published pins (single source of truth, kept in
+          # sync with goose's own CI and Dockerfile) and runs go mod tidy
+          # with the private-repo credentials applied.
+          if [ -n "$GH_TOKEN" ]; then
+            git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf https://github.com/
+          fi
           cd goose-engine
-          go mod edit \
-            -replace=github.com/goose-network/goose-plugin-api=github.com/goose-network/goose-plugin-api@v0.0.0-20260923221657-7ba364a3ef3c \
-            -replace=github.com/goose-network/goose-plugin-psiphon=github.com/goose-network/psiphon@v0.0.0-20260924055847-0cb94efc10fd \
-            -replace=github.com/goose-network/goose-plugin-mihomo=github.com/goose-network/goose-plugin-mihomo@v0.0.0-20261004175635-b916aa8de2de \
-            -replace=github.com/goose-network/goose-plugin-singbox=github.com/goose-network/goose-plugin-singbox@v0.0.0-20261004175644-403bc49594ea \
-            -replace=github.com/metacubex/mihomo=github.com/metacubex/mihomo@v0.0.0-20260922124647-afe94dafef8c \
-            -replace=github.com/sagernet/sing-box=github.com/sagernet/sing-box@v0.0.0-20260922113237-e5e705ed802d \
-            -replace=github.com/Psiphon-Labs/psiphon-tunnel-core=github.com/goose-network/psiphon-tunnel-core@v0.0.0-20260923221754-213987d32b71
-          go mod tidy
+          scripts/pin-replacements.sh --tidy
           go build -o /tmp/goose-bin ./cmd/goose
 
       - name: Start goose engine
