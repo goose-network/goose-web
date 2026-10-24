@@ -1,7 +1,7 @@
 // src/charts/BarChart.test.ts — the "Other" fold and bar geometry helpers.
 
 import { describe, expect, it } from "vitest";
-import { barRows } from "./BarChart";
+import { barRows, truncate } from "./BarChart";
 
 describe("barRows", () => {
   it("keeps a small list sorted by value, no fold", () => {
@@ -33,5 +33,17 @@ describe("barRows", () => {
 
   it("handles an empty dataset", () => {
     expect(barRows([], 8)).toEqual({ rows: [], total: 0 });
+  });
+});
+
+describe("truncate", () => {
+  it("leaves short labels alone", () => {
+    expect(truncate("abc", 5)).toBe("abc");
+    expect(truncate("abcde", 5)).toBe("abcde");
+  });
+
+  it("keeps the identifying tail at exactly maxChars", () => {
+    expect(truncate("abcdef", 5)).toBe("…cdef");
+    expect(truncate("example.com:443", 8)).toBe("…com:443");
   });
 });

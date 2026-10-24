@@ -2,10 +2,11 @@
 //
 // Implements the dataviz mark specs: 2px lines with round joins, >=8px
 // end-markers with a 2px surface ring, hairline solid gridlines, a crosshair
-// that snaps to the nearest X, one tooltip listing every series at that X,
-// and a table-view twin rendered below (also the accessible fallback).
+// that snaps to the nearest X with a tooltip that follows it, and a
+// table-view twin rendered below (also the accessible fallback).
 
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
+import { usePlotWidth } from "./usePlotWidth";
 
 export interface Series {
   /** series name; also the legend / tooltip label */
@@ -27,7 +28,11 @@ export interface LineChartProps {
   height?: number;
 }
 
-const PAD = { top: 12, right: 16, bottom: 24, left: 44 };
+const PAD = { top: 12, right: 18, bottom: 26, left: 48 };
+/** x labels are drawn at most this often; both ends always are */
+const MAX_X_LABELS = 6;
+/** min plot width per x label, so labels never collide on narrow cards */
+const PX_PER_X_LABEL = 90;
 
 export function LineChart({
   xLabels,
@@ -37,12 +42,15 @@ export function LineChart({
   height = 220,
 }: LineChartProps) {
   const [hover, setHover] = useState<number | null>(null);
-  const svgRef = useRef<SVGSVGElement>(null);
-  const width = 640; // responsive via viewBox + preserveAspectRatio=none off
+  /** pointer x as a fraction of the plot width, for tooltip placement */
+  const [pointer, setPointer] = useState(0.5);
+  /** viewBox width == rendered width, so axis text keeps its true size */
+  const { ref: plotRef, width: WIDTH } = usePlotWidth();
 
-  const { xs, ys, ticks, paths } = useMemo(() => {
-    const n = xLabels.length;
-    const innerW = width - PAD.left - PAD.right;
+  const n = xLabels.length;
+
+  const { xs, ys, ticks, paths, labelIdx } = useMemo(() => {
+    const innerW = WIDTH - PAD.left - PAD.right;
     const innerH = height - PAD.top - PAD.bottom;
     const max = Math.max(1, ...series.flatMap((s) => s.points));
     const maxTick = niceCeil(max);
@@ -53,15 +61,17 @@ export function LineChart({
     const paths = series.map((s) =>
       s.points.map((v, i) => `${i === 0 ? "M" : "L"}${x(i)},${y(v)}`).join(" "),
     );
-    return { xs: x, ys: y, ticks, paths };
-  }, [xLabels, series, height]);
-
-  const n = xLabels.length;
-  const labelEvery = Math.ceil(n / 8); // thin crowded x labels
+    const maxLabels = Math.max(
+      2,
+      Math.min(MAX_X_LABELS, Math.floor(innerW / PX_PER_X_LABEL)),
+    );
+    return { xs: x, ys: y, ticks, paths, labelIdx: labelIndices(n, maxLabels) };
+  }, [xLabels, series, height, n, WIDTH]);
 
   const move = (e: React.PointerEvent<SVGSVGElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
-    const px = ((e.clientX - rect.left) / rect.width) * width;
+    const px = ((e.clientX - rect.left) / rect.width) * WIDTH;
+    setPointer(rect.width === 0 ? 0.5 : (e.clientX - rect.left) / rect.width);
     let best = 0;
     let bestD = Infinity;
     for (let i = 0; i < n; i++) {
@@ -89,10 +99,9 @@ export function LineChart({
           </span>
         )}
       </figcaption>
-      <div style={{ opacity: hover === null ? 1 : 1 }}>
+      <div className="chart-plot" ref={plotRef}>
         <svg
-          ref={svgRef}
-          viewBox={`0 0 ${width} ${height}`}
+          viewBox={`0 0 ${WIDTH} ${height}`}
           role="img"
           aria-label={title}
           style={{ width: "100%", height: "auto", display: "block" }}
@@ -104,15 +113,15 @@ export function LineChart({
             <g key={t.v}>
               <line
                 x1={PAD.left}
-                x2={width - PAD.right}
+                x2={WIDTH - PAD.right}
                 y1={t.y}
                 y2={t.y}
                 stroke="var(--grid)"
                 strokeWidth={1}
               />
               <text
-                x={PAD.left - 6}
-                y={t.y + 3}
+                x={PAD.left - 7}
+                y={t.y + 3.5}
                 textAnchor="end"
                 className="axis-text"
               >
@@ -123,26 +132,25 @@ export function LineChart({
           {/* baseline */}
           <line
             x1={PAD.left}
-            x2={width - PAD.right}
+            x2={WIDTH - PAD.right}
             y1={height - PAD.bottom}
             y2={height - PAD.bottom}
             stroke="var(--baseline)"
             strokeWidth={1}
           />
-          {/* x labels */}
-          {xLabels.map((l, i) =>
-            i % labelEvery === 0 ? (
-              <text
-                key={i}
-                x={xs(i)}
-                y={height - 6}
-                textAnchor="middle"
-                className="axis-text"
-              >
-                {l}
-              </text>
-            ) : null,
-          )}
+          {/* x labels: evenly spaced, first anchored start / last anchored end
+              so neither is clipped by the plot edge */}
+          {labelIdx.map((i) => (
+            <text
+              key={i}
+              x={xs(i)}
+              y={height - 8}
+              textAnchor={i === 0 ? "start" : i === n - 1 ? "end" : "middle"}
+              className="axis-text"
+            >
+              {xLabels[i]}
+            </text>
+          ))}
           {/* crosshair */}
           {hover !== null && (
             <line
@@ -165,18 +173,15 @@ export function LineChart({
                 strokeLinejoin="round"
                 strokeLinecap="round"
               />
-              {s.points.map((v, i) =>
-                i === n - 1 ? (
-                  <circle
-                    key={i}
-                    cx={xs(i)}
-                    cy={ys(v)}
-                    r={4}
-                    fill={s.color}
-                    stroke="var(--surface-1)"
-                    strokeWidth={2}
-                  />
-                ) : null,
+              {n > 0 && (
+                <circle
+                  cx={xs(n - 1)}
+                  cy={ys(s.points[n - 1] ?? 0)}
+                  r={4}
+                  fill={s.color}
+                  stroke="var(--surface-1)"
+                  strokeWidth={2}
+                />
               )}
               {hover !== null && (
                 <circle
@@ -191,24 +196,44 @@ export function LineChart({
             </g>
           ))}
         </svg>
+        {hover !== null && (
+          <div
+            className="chart-tooltip"
+            aria-hidden="true"
+            style={{
+              left: `${Math.min(0.85, Math.max(0.15, pointer)) * 100}%`,
+              top: 8,
+            }}
+          >
+            <div className="chart-tooltip-title">{xLabels[hover]}</div>
+            {series.map((s) => (
+              <div key={s.name} className="chart-tooltip-row">
+                <span className="chart-key" style={{ background: s.color }} />
+                <span className="chart-tooltip-name">{s.name}</span>
+                <span className="chart-tooltip-val">
+                  {format(s.points[hover] ?? 0)}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
-      {hover !== null && (
-        <div className="chart-tooltip" role="status">
-          <div className="chart-tooltip-title">{xLabels[hover]}</div>
-          {series.map((s) => (
-            <div key={s.name} className="chart-tooltip-row">
-              <span className="chart-key" style={{ background: s.color }} />
-              <span className="chart-tooltip-name">{s.name}</span>
-              <span className="chart-tooltip-val">
-                {format(s.points[hover] ?? 0)}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
       <ChartTable xLabels={xLabels} series={series} format={format} />
     </figure>
   );
+}
+
+/** Evenly spaced label indices, always including the first and last. */
+export function labelIndices(n: number, max: number): number[] {
+  if (n <= 0) return [];
+  const k = Math.min(n, max);
+  if (k <= 1) return [0];
+  const out: number[] = [];
+  for (let j = 0; j < k; j++) {
+    const i = Math.round((j * (n - 1)) / (k - 1));
+    if (out[out.length - 1] !== i) out.push(i);
+  }
+  return out;
 }
 
 function ChartTable({
@@ -225,9 +250,10 @@ function ChartTable({
       <summary>Table view</summary>
       <div className="table-wrap">
         <table className="data">
+          <caption className="sr-only">Data behind the chart</caption>
           <thead>
             <tr>
-              <th>x</th>
+              <th scope="col">Time</th>
               {series.map((s) => (
                 <th key={s.name} className="num" scope="col">
                   {s.name}

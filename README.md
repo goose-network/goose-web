@@ -5,7 +5,8 @@ proxy-pool engine, built on the generated TypeScript SDK
 ([goose-sdk-ts](https://github.com/goose-network/goose-sdk-ts)).
 
 It manages every engine resource over the admin API — engine config,
-inbounds, outbounds, pools, chains — and renders a metrics dashboard for
+inbounds, outbounds, pools, chains, providers — and observes what the
+engine sees: exit-IP checks per outbound and a metrics dashboard for
 recent proxied requests.
 
 ## Stack
@@ -17,6 +18,11 @@ recent proxied requests.
 - Charts are dependency-free SVG components (`src/charts/`), following the
   dataviz rules: validated palette with light/dark modes, table-view twin
   under every chart, crosshair tooltips on lines, per-mark hover on bars.
+- One design system in CSS custom properties (`src/palette.css`,
+  `src/styles.css`): light + dark themes via `data-theme` on `<html>`,
+  WCAG-AA contrast tokens, and shared primitives (`DataTable`, `FormCard`,
+  `fields`, `ConfirmButton`, `Notice`, `SearchInput`, `PageHeader`) so every
+  page reads the same.
 
 ## Run it
 
@@ -43,7 +49,8 @@ serving the API under the same origin.
 ```sh
 npm run build      # tsc -b && vite build -> dist/
 npm run preview    # serve the production build locally
-npm test           # vitest (pure helpers: formatting, bucketing, bar folding)
+npm test           # vitest (pure helpers: formatting, bucketing, bar
+                   # folding, label thinning, validators, filter matching)
 npm run e2e        # Playwright against a running stack (see below)
 ```
 
@@ -87,19 +94,23 @@ docker run -p 8080:8080 -e GOOSE_API_URL=http://host.docker.internal:9090 \
 
 | Path                  | What it shows / edits                                       |
 | --------------------- | --------------------------------------------------------- |
-| `/` (Overview)        | engine config (network stack, metrics DB, admin auth, ...)  |
+| `/` (Overview)        | engine status + resource counts, and the live engine config (network stack, metrics DB, admin auth, ...) |
 | `/inbounds`           | HTTP/SOCKS5 listeners CRUD                                 |
 | `/outbounds`          | outbound protocol plugins CRUD                             |
 | `/pools`              | pools (outbound sets + filters + selector) CRUD             |
-| `/chains`            | request chains (pool layers) CRUD                          |
+| `/chains`            | request chains (pool layers) CRUD + reachability probes for auto chains |
 | `/providers`          | dynamic outbound providers CRUD (subscription links feed a managed pool) |
+| `/exit-checks`        | exit IP per outbound, check history, and the check schedule |
 | `/metrics`            | request dashboard: KPI tiles, volume/latency trends, per-inbound volume, top targets, raw table |
 
 | File                       | Role                                                |
 | -------------------------- | ---------------------------------------------------- |
 | `src/sdk.tsx`              | `Goose` SDK instance in React context + connection UI |
+| `src/theme.tsx`            | light/dark/system theme provider (`data-theme`)      |
 | `src/useAsync.ts`          | fetch-on-mount hook (reload, held render on refresh)  |
+| `src/useResource.ts`       | CRUD-page hook: list + create/edit/delete over `useAsync` |
+| `src/validate.ts`          | field validators (required, host:port, http url)      |
 | `src/format.ts`            | duration / count / time display helpers               |
 | `src/charts/*`             | LineChart, BarChart, StatTile + palette                |
 | `src/pages/*`             | one panel per resource                                 |
-| `src/components/*`         | StringList, KvEditor form widgets                     |
+| `src/components/*`         | DataTable, FormCard, fields, ConfirmButton, Notice, SearchInput, StringList, PageHeader, ThemeToggle, icons |

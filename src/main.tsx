@@ -2,6 +2,8 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import { SdkProvider } from "./sdk";
+import { ThemeProvider } from "./theme";
+import { ToastProvider } from "./components/Notice";
 import { App } from "./App";
 import "./palette.css";
 import "./styles.css";
@@ -11,9 +13,13 @@ import "./styles.css";
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <BrowserRouter>
-      <SdkProvider>
-        <App />
-      </SdkProvider>
+      <ThemeProvider>
+        <SdkProvider>
+          <ToastProvider>
+            <App />
+          </ToastProvider>
+        </SdkProvider>
+      </ThemeProvider>
     </BrowserRouter>
   </StrictMode>,
 );

@@ -1,8 +1,15 @@
 // src/pages/OutboundsPage.tsx — CRUD over outbound proxy specs.
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useSdk } from "../sdk";
-import { errMessage, useAsync } from "../useAsync";
+import { useResource } from "../useResource";
+import { collect, required } from "../validate";
+import { PageHeader } from "../components/PageHeader";
+import { DataTable, EmptyState, type Column } from "../components/DataTable";
+import { FormCard } from "../components/FormCard";
+import { ConfirmButton } from "../components/ConfirmButton";
+import { SearchInput, matches } from "../components/SearchInput";
+import { SelectField, TextField } from "../components/fields";
 import { KvEditor } from "../components/KvEditor";
 import type { OutboundSpec } from "@goose-network/goose-sdk";
 
@@ -32,157 +39,149 @@ const PROTOCOLS = [
 ] as const;
 
 export function OutboundsPage() {
-  return (
-    <>
-      <h1 className="page-title">Outbounds</h1>
-      <p className="page-sub">
-        Proxy servers and providers the engine can dial through.
-      </p>
-      <OutboundsCard />
-    </>
-  );
-}
-
-function OutboundsCard() {
   const { goose } = useSdk();
-  const { data, error, loading, reload } = useAsync(
-    () => goose.listOutbounds(),
-    [goose],
+  const [filter, setFilter] = useState("");
+
+  const r = useResource<OutboundSpec>({
+    api: {
+      list: () => goose.listOutbounds(),
+      save: (d) => goose.createOutbound(d),
+      remove: (id) => goose.deleteOutbound(id),
+    },
+    deps: [goose],
+    idOf: (o) => o.id ?? "",
+    blank: () => ({ id: "", protocol: "direct", config: {} }),
+    normalize,
+    noun: "outbound",
+    validate: (d) => collect({ id: required(d.id, "An ID is required") }),
+  });
+
+  const items = useMemo(
+    () =>
+      r.items.filter((o) =>
+        matches(`${o.id ?? ""} ${o.protocol ?? ""} ${summarize(o.config)}`, filter),
+      ),
+    [r.items, filter],
   );
-  const [draft, setDraft] = useState<OutboundSpec | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
 
-  if (loading && data === undefined)
-    return <div className="loading">Loading…</div>;
-  if (error !== null)
-    return <div className="error-box">Failed to load outbounds: {error}</div>;
-
-  const startCreate = () =>
-    setDraft({ id: "", protocol: "direct", config: {} });
-  const startEdit = (o: OutboundSpec) => setDraft(normalize(o));
-
-  const save = async () => {
-    if (draft === null) return;
-    setSaving(true);
-    setSaveError(null);
-    try {
-      await goose.createOutbound(draft);
-      setDraft(null);
-      reload();
-    } catch (err) {
-      setSaveError(errMessage(err));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const del = async (id: string) => {
-    try {
-      await goose.deleteOutbound(id);
-      reload();
-    } catch (err) {
-      setSaveError(errMessage(err));
-    }
-  };
-
-  const items = data ?? [];
+  const columns: Array<Column<OutboundSpec>> = [
+    { key: "id", header: "ID", className: "mono", render: (o) => o.id },
+    {
+      key: "protocol",
+      header: "Protocol",
+      render: (o) => <span className="pill">{o.protocol ?? ""}</span>,
+    },
+    {
+      key: "config",
+      header: "Config",
+      className: "mono ellipsis",
+      render: (o) => (
+        <span title={summarize(o.config)}>{summarize(o.config)}</span>
+      ),
+    },
+    {
+      key: "actions",
+      header: <span className="sr-only">Actions</span>,
+      className: "actions",
+      render: (o) => (
+        <>
+          <button type="button" className="ghost" onClick={() => r.startEdit(o)}>
+            Edit
+          </button>{" "}
+          <ConfirmButton onConfirm={() => void r.remove(o)} title={`Delete ${o.id ?? ""}`} />
+        </>
+      ),
+    },
+  ];
 
   return (
     <>
-      {saveError !== null && <div className="error-box">{saveError}</div>}
-      <div className="toolbar">
-        <button className="primary" onClick={startCreate}>
-          New outbound
-        </button>
-      </div>
+      <PageHeader
+        title="Outbounds"
+        sub="Proxy servers and providers the engine can dial through."
+        actions={
+          <button type="button" className="primary" onClick={r.startCreate}>
+            New outbound
+          </button>
+        }
+      />
 
-      {draft !== null && (
-        <div className="card">
-          <h2>{draft.id === "" ? "New outbound" : `Edit ${draft.id}`}</h2>
+      {r.draft !== null && (
+        <FormCard
+          title={r.isNew ? "New outbound" : `Edit ${r.idOf(r.draft)}`}
+          onSave={() => void r.save()}
+          onCancel={r.cancel}
+          saving={r.saving}
+          dirty
+          error={r.saveError}
+          onDismissError={r.dismissSaveError}
+        >
           <div className="row">
-            <div className="field">
-              <label htmlFor="out-id">ID</label>
-              <input
-                id="out-id"
-                type="text"
-                value={draft.id ?? ""}
-                onChange={(e) =>
-                  setDraft({ ...draft, id: e.target.value })
-                }
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="out-proto">Protocol</label>
-              <select
-                id="out-proto"
-                value={draft.protocol ?? "direct"}
-                onChange={(e) =>
-                  setDraft({ ...draft, protocol: e.target.value })
-                }
-              >
-                {PROTOCOLS.map((p) => (
-                  <option key={p} value={p}>
-                    {p}
-                  </option>
-                ))}
-              </select>
-            </div>
+            <TextField
+              id="out-id"
+              label="ID"
+              mono
+              value={r.draft.id ?? ""}
+              error={r.fieldErrors.id}
+              disabled={!r.isNew}
+              onChange={(id) => r.setDraft({ ...r.draft!, id })}
+              placeholder="relay-1"
+              autoFocus={r.isNew}
+            />
+            <SelectField
+              id="out-proto"
+              label="Protocol"
+              value={r.draft.protocol ?? "direct"}
+              options={[...PROTOCOLS]}
+              onChange={(protocol) => r.setDraft({ ...r.draft!, protocol })}
+            />
           </div>
           <KvEditor
             id="out-config"
             label="Config (JSON)"
-            value={draft.config}
-            onChange={(config) => setDraft({ ...draft, config })}
+            value={r.draft.config}
+            onChange={(config) => r.setDraft({ ...r.draft!, config })}
           />
-          <div className="toolbar">
-            <button className="primary" onClick={() => void save()} disabled={saving}>
-              {saving ? "Saving…" : "Save"}
-            </button>
-            <button onClick={() => setDraft(null)}>Cancel</button>
-          </div>
-        </div>
+        </FormCard>
       )}
 
+      <div className="filter-bar">
+        <SearchInput
+          id="outbound-filter"
+          value={filter}
+          onChange={setFilter}
+          placeholder="Filter by id, protocol, config…"
+        />
+        <span className="hint" style={{ margin: 0, alignSelf: "center" }}>
+          {items.length} of {r.items.length}
+        </span>
+      </div>
+
       <div className="card">
-        {items.length === 0 ? (
-          <div className="empty">No outbounds configured.</div>
-        ) : (
-          <div className="table-wrap">
-            <table className="data">
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>Protocol</th>
-                  <th>Config</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.map((o) => (
-                  <tr key={o.id}>
-                    <td className="mono">{o.id}</td>
-                    <td>
-                      <span className="pill">{o.protocol ?? ""}</span>
-                    </td>
-                    <td className="mono" style={{ maxWidth: 420 }}>
-                      {summarize(o.config)}
-                    </td>
-                    <td>
-                      <button onClick={() => startEdit(o)}>Edit</button>{" "}
-                      <button
-                        className="danger"
-                        onClick={() => void del(o.id ?? "")}
-                      >
-                        Delete
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+        <DataTable
+          caption="Outbound proxy specs"
+          columns={columns}
+          rows={items}
+          rowKey={(o) => o.id ?? ""}
+          loading={r.loading}
+          error={r.error}
+          onRetry={r.reload}
+          empty={
+            r.items.length === 0 ? (
+              <EmptyState
+                title="No outbounds configured"
+                hint="Add one directly, or let a provider import a subscription."
+                action={
+                  <button type="button" className="primary" onClick={r.startCreate}>
+                    New outbound
+                  </button>
+                }
+              />
+            ) : (
+              <EmptyState title="No outbounds match" hint={`Nothing matches “${filter}”.`} />
+            )
+          }
+        />
       </div>
     </>
   );

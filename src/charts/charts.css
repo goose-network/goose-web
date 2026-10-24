@@ -60,13 +60,22 @@
   stroke-width: 2;
 }
 
+.chart-plot {
+  position: relative;
+}
+
 .chart-tooltip {
+  position: absolute;
+  transform: translate(-50%, -100%);
+  z-index: 5;
+  pointer-events: none;
   border: 1px solid var(--border);
   background: var(--surface-2);
-  border-radius: 8px;
-  padding: 8px 10px;
-  margin-top: 6px;
+  border-radius: var(--radius-m);
+  box-shadow: var(--shadow-2);
+  padding: 7px 10px;
   max-width: 320px;
+  white-space: nowrap;
 }
 
 .chart-tooltip-title {
@@ -117,37 +126,43 @@
 /* stat tiles / KPI row */
 
 .kpi-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
   gap: 12px;
-  flex-wrap: wrap;
-  margin-bottom: 20px;
+  margin-bottom: 18px;
 }
 
 .stat-tile {
-  flex: 1;
-  min-width: 150px;
+  min-width: 0;
   background: var(--surface-1);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-1);
   padding: 12px 16px;
 }
 
 .stat-label {
-  font-size: 12px;
-  color: var(--text-secondary);
-  margin-bottom: 2px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 4px;
 }
 
 .stat-value {
-  font-size: 28px;
-  font-weight: 600;
-  line-height: 1.2;
+  font-size: 27px;
+  font-weight: 650;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
 }
 
 .stat-delta {
   font-size: 12px;
-  margin-top: 2px;
+  margin-top: 3px;
   font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
 }
 
 .stat-delta.good {
@@ -155,7 +170,7 @@
 }
 
 .stat-delta.bad {
-  color: var(--status-critical);
+  color: var(--status-critical-text);
 }
 
 .stat-spark {
@@ -163,22 +178,4 @@
   height: 28px;
   margin-top: 6px;
   display: block;
-}
-
-/* metrics filter row: one row, above the charts it scopes */
-
-.metrics-filters {
-  display: flex;
-  align-items: end;
-  gap: 12px;
-  margin-bottom: 16px;
-  flex-wrap: wrap;
-}
-
-.metrics-filters label {
-  margin: 0;
-}
-
-.metrics-filters .spacer {
-  flex: 1;
 }

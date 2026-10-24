@@ -1,76 +1,177 @@
-/* src/palette.css — dataviz palette as CSS custom properties (light + dark).
+/* src/palette.css — design tokens as CSS custom properties (light + dark).
 
-   Roles follow the validated reference palette: the categorical slots were
-   checked with the dataviz six-checks validator in both modes (light surface
-   #fcfcfb, dark surface #1a1a19). Chart code references roles only, never hex. */
+   Two families of tokens live here:
+
+   - *chart* tokens (--series-*, --seq-*) follow the validated dataviz
+     reference palette; the categorical slots were checked with the dataviz
+     six-checks validator in both modes (light surface #fcfcfb, dark surface
+     #1a1a19). Chart code references roles only, never hex. Do not retune
+     these without re-running the validator.
+   - *UI* tokens (--accent, --text-*, --control-border, status text) are
+     chrome, not data. They are chosen for WCAG AA text contrast on the
+     surfaces below: body text >= 4.5:1, control boundaries >= 3:1. Links and
+     buttons wear --accent, never a series color.
+
+   Theme selection: `data-theme="light"|"dark"` on <html> overrides; with no
+   attribute the OS preference wins (see src/theme.tsx). */
+
+/* color-scheme on :root so native scrollbars and form widgets match the
+   selected mode; the token blocks below scope to .viz-root. */
+:root {
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
 
 .viz-root {
   color-scheme: light;
+
+  /* surfaces */
   --surface-1: #fcfcfb;
   --surface-2: #ffffff;
-  --page: #f9f9f7;
+  --page: #f4f4f1;
+  --surface-sunken: #efefeb;
+
+  /* ink */
   --text-primary: #0b0b0b;
   --text-secondary: #52514e;
-  --text-muted: #898781;
+  --text-muted: #6b6a64; /* 5.3:1 on surface-1 */
+
+  /* hairlines & control boundaries */
   --grid: #e1e0d9;
   --baseline: #c3c2b7;
   --border: rgba(11, 11, 11, 0.1);
+  --control-border: #8b8a82; /* 3.4:1 — input/button edges */
+
+  /* interactive chrome (AA as text and as a fill with white on it) */
+  --accent: #2268c4;
+  --accent-text: #1f61ba;
+  --accent-soft: rgba(34, 104, 196, 0.1);
+  --focus-ring: #2268c4;
+
+  /* chart palette — validated, do not retune casually */
   --series-1: #2a78d6;
   --series-2: #eb6834;
   --series-3: #1baf7a;
-  --status-good: #0ca30c;
-  --status-good-text: #006300;
-  --status-warning: #fab219;
-  --status-serious: #ec835a;
-  --status-critical: #d03b3b;
   --seq-450: #2a78d6;
   --seq-250: #86b6ef;
+
+  /* status: fills for dots/pills, -text for ink */
+  --status-good: #0ca30c;
+  --status-good-text: #006300;
+  --status-good-soft: rgba(12, 163, 12, 0.12);
+  --status-warning: #fab219;
+  --status-warning-text: #7a5300;
+  --status-warning-soft: rgba(250, 178, 25, 0.16);
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+  --status-critical-text: #b32626;
+  --status-critical-soft: rgba(208, 59, 59, 0.1);
+
+  /* elevation & shape */
+  --shadow-1: 0 1px 2px rgba(11, 11, 11, 0.06), 0 1px 3px rgba(11, 11, 11, 0.08);
+  --shadow-2: 0 4px 16px rgba(11, 11, 11, 0.12);
+  --radius-s: 6px;
+  --radius-m: 8px;
+  --radius-l: 12px;
 }
+
+/* --- dark: OS preference, unless the reader pinned light --- */
 
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) .viz-root {
     color-scheme: dark;
+
     --surface-1: #1a1a19;
     --surface-2: #232322;
     --page: #0d0d0d;
+    --surface-sunken: #141413;
+
     --text-primary: #ffffff;
     --text-secondary: #c3c2b7;
-    --text-muted: #898781;
+    --text-muted: #8f8e86; /* 5.3:1 on surface-1 */
+
     --grid: #2c2c2a;
     --baseline: #383835;
     --border: rgba(255, 255, 255, 0.1);
+    --control-border: #6b6b64; /* 3.2:1 */
+
+    --accent: #2f6fbd;
+    --accent-text: #6ea8ee;
+    --accent-soft: rgba(110, 168, 238, 0.14);
+    --focus-ring: #6ea8ee;
+
     --series-1: #3987e5;
     --series-2: #d95926;
     --series-3: #199e70;
-    --status-good: #0ca30c;
-    --status-good-text: #0ca30c;
-    --status-warning: #fab219;
-    --status-serious: #ec835a;
-    --status-critical: #e66767;
     --seq-450: #3987e5;
     --seq-250: #5598e7;
+
+    --status-good: #0ca30c;
+    --status-good-text: #4cc24c;
+    --status-good-soft: rgba(12, 163, 12, 0.18);
+    --status-warning: #fab219;
+    --status-warning-text: #d9a53a;
+    --status-warning-soft: rgba(250, 178, 25, 0.16);
+    --status-serious: #ec835a;
+    --status-critical: #e66767;
+    --status-critical-text: #e66767;
+    --status-critical-soft: rgba(230, 103, 103, 0.16);
+
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+    --shadow-2: 0 6px 20px rgba(0, 0, 0, 0.55);
   }
 }
 
+/* --- dark: pinned by the theme toggle --- */
+
 :root[data-theme="dark"] .viz-root {
   color-scheme: dark;
+
   --surface-1: #1a1a19;
   --surface-2: #232322;
   --page: #0d0d0d;
+  --surface-sunken: #141413;
+
   --text-primary: #ffffff;
   --text-secondary: #c3c2b7;
-  --text-muted: #898781;
+  --text-muted: #8f8e86;
+
   --grid: #2c2c2a;
   --baseline: #383835;
   --border: rgba(255, 255, 255, 0.1);
+  --control-border: #6b6b64;
+
+  --accent: #2f6fbd;
+  --accent-text: #6ea8ee;
+  --accent-soft: rgba(110, 168, 238, 0.14);
+  --focus-ring: #6ea8ee;
+
   --series-1: #3987e5;
   --series-2: #d95926;
   --series-3: #199e70;
-  --status-good: #0ca30c;
-  --status-good-text: #0ca30c;
-  --status-warning: #fab219;
-  --status-serious: #ec835a;
-  --status-critical: #e66767;
   --seq-450: #3987e5;
   --seq-250: #5598e7;
+
+  --status-good: #0ca30c;
+  --status-good-text: #4cc24c;
+  --status-good-soft: rgba(12, 163, 12, 0.18);
+  --status-warning: #fab219;
+  --status-warning-text: #d9a53a;
+  --status-warning-soft: rgba(250, 178, 25, 0.16);
+  --status-serious: #ec835a;
+  --status-critical: #e66767;
+  --status-critical-text: #e66767;
+  --status-critical-soft: rgba(230, 103, 103, 0.16);
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-2: 0 6px 20px rgba(0, 0, 0, 0.55);
 }

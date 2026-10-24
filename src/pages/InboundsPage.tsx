@@ -1,9 +1,15 @@
 // src/pages/InboundsPage.tsx — CRUD over inbound listeners.
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useSdk } from "../sdk";
-import { errMessage, useAsync } from "../useAsync";
-import { StringList } from "../components/StringList";
+import { useResource } from "../useResource";
+import { collect, hostPort, required } from "../validate";
+import { PageHeader } from "../components/PageHeader";
+import { DataTable, EmptyState, type Column } from "../components/DataTable";
+import { FormCard } from "../components/FormCard";
+import { ConfirmButton } from "../components/ConfirmButton";
+import { SearchInput, matches } from "../components/SearchInput";
+import { SelectField, TextField, FieldGroup } from "../components/fields";
 import { KvEditor } from "../components/KvEditor";
 import type { Inbound } from "@goose-network/goose-sdk";
 import type { components } from "@goose-network/goose-sdk";
@@ -15,154 +21,167 @@ type Policy = components["schemas"]["config.InboundPolicy"];
 const FILTERS = ["location", "latency", "protocol"] as const;
 
 export function InboundsPage() {
-  return (
-    <>
-      <h1 className="page-title">Inbounds</h1>
-      <p className="page-sub">
-        HTTP/SOCKS5 listeners clients connect to. Changes apply live.
-      </p>
-      <InboundsCard />
-    </>
-  );
-}
-
-function InboundsCard() {
   const { goose } = useSdk();
-  const { data, error, loading, reload } = useAsync(
-    () => goose.listInbounds(),
-    [goose],
+  const [filter, setFilter] = useState("");
+
+  const r = useResource<Inbound>({
+    api: {
+      list: () => goose.listInbounds(),
+      save: (d) => goose.createInbound(d),
+      remove: (id) => goose.deleteInbound(id),
+    },
+    deps: [goose],
+    idOf: (i) => i.id ?? "",
+    blank: () => ({
+      id: "",
+      protocol: "http",
+      listen: "127.0.0.1:8080",
+      users: [],
+      policy: {},
+    }),
+    normalize,
+    noun: "inbound",
+    validate: (d) =>
+      collect({
+        id: required(d.id, "An ID is required"),
+        listen: hostPort(d.listen, "Use host:port, e.g. 127.0.0.1:8080"),
+      }),
+  });
+
+  const items = useMemo(
+    () =>
+      r.items.filter((i) =>
+        matches(`${i.id ?? ""} ${i.protocol ?? ""} ${i.listen ?? ""}`, filter),
+      ),
+    [r.items, filter],
   );
-  const [draft, setDraft] = useState<Inbound | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
 
-  if (loading && data === undefined)
-    return <div className="loading">Loading…</div>;
-  if (error !== null)
-    return <div className="error-box">Failed to load inbounds: {error}</div>;
-
-  const startCreate = () =>
-    setDraft({ id: "", protocol: "http", listen: "127.0.0.1:8080", users: [], policy: {} });
-  const startEdit = (inb: Inbound) => setDraft(normalize(inb));
-
-  const save = async () => {
-    if (draft === null) return;
-    setSaving(true);
-    setSaveError(null);
-    try {
-      await goose.createInbound(draft);
-      setDraft(null);
-      reload();
-    } catch (err) {
-      setSaveError(errMessage(err));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const del = async (id: string) => {
-    try {
-      await goose.deleteInbound(id);
-      reload();
-    } catch (err) {
-      setSaveError(errMessage(err));
-    }
-  };
-
-  const items = data ?? [];
+  const columns: Array<Column<Inbound>> = [
+    { key: "id", header: "ID", className: "mono", render: (i) => i.id },
+    {
+      key: "protocol",
+      header: "Protocol",
+      render: (i) => <span className="pill">{i.protocol ?? ""}</span>,
+    },
+    { key: "listen", header: "Listen", className: "mono", render: (i) => i.listen },
+    {
+      key: "users",
+      header: "Users",
+      render: (i) =>
+        (i.users ?? []).length === 0 ? (
+          <span className="hint" style={{ margin: 0 }}>
+            no auth
+          </span>
+        ) : (
+          (i.users ?? []).length
+        ),
+    },
+    {
+      key: "chain",
+      header: "Routing",
+      className: "mono",
+      render: (i) => routingLabel(i.policy),
+    },
+    {
+      key: "actions",
+      header: <span className="sr-only">Actions</span>,
+      className: "actions",
+      render: (i) => (
+        <>
+          <button type="button" className="ghost" onClick={() => r.startEdit(i)}>
+            Edit
+          </button>{" "}
+          <ConfirmButton onConfirm={() => void r.remove(i)} title={`Delete ${i.id ?? ""}`} />
+        </>
+      ),
+    },
+  ];
 
   return (
     <>
-      {saveError !== null && <div className="error-box">{saveError}</div>}
-      <div className="toolbar">
-        <button className="primary" onClick={startCreate}>
-          New inbound
-        </button>
-      </div>
+      <PageHeader
+        title="Inbounds"
+        sub="HTTP/SOCKS5 listeners clients connect to. Changes apply live."
+        actions={
+          <button type="button" className="primary" onClick={r.startCreate}>
+            New inbound
+          </button>
+        }
+      />
 
-      {draft !== null && (
-        <div className="card">
-          <h2>{draft.id === "" ? "New inbound" : `Edit ${draft.id}`}</h2>
-          <InboundForm draft={draft} setDraft={setDraft} />
-          <div className="toolbar">
-            <button className="primary" onClick={() => void save()} disabled={saving}>
-              {saving ? "Saving…" : "Save"}
-            </button>
-            <button onClick={() => setDraft(null)}>Cancel</button>
-          </div>
-        </div>
+      {r.draft !== null && (
+        <FormCard
+          title={r.isNew ? "New inbound" : `Edit ${r.idOf(r.draft)}`}
+          onSave={() => void r.save()}
+          onCancel={r.cancel}
+          saving={r.saving}
+          dirty
+          error={r.saveError}
+          onDismissError={r.dismissSaveError}
+        >
+          <InboundForm
+            draft={r.draft}
+            setDraft={r.setDraft}
+            fieldErrors={r.fieldErrors}
+            idLocked={!r.isNew}
+          />
+        </FormCard>
       )}
 
+      <div className="filter-bar">
+        <SearchInput id="inbound-filter" value={filter} onChange={setFilter} placeholder="Filter by id, protocol, listen…" />
+        <span className="hint" style={{ margin: 0, alignSelf: "center" }}>
+          {items.length} of {r.items.length}
+        </span>
+      </div>
+
       <div className="card">
-        {items.length === 0 ? (
-          <div className="empty">No inbounds configured.</div>
-        ) : (
-          <div className="table-wrap">
-            <table className="data">
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>Protocol</th>
-                  <th>Listen</th>
-                  <th>Users</th>
-                  <th>Chain</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.map((inb) => (
-                  <InboundRow key={inb.id} inb={inb} onEdit={() => startEdit(inb)} onDelete={() => void del(inb.id ?? "")} />
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+        <DataTable
+          caption="Inbound listeners"
+          columns={columns}
+          rows={items}
+          rowKey={(i) => i.id ?? ""}
+          loading={r.loading}
+          error={r.error}
+          onRetry={r.reload}
+          empty={
+            r.items.length === 0 ? (
+              <EmptyState
+                title="No inbounds configured"
+                hint="Clients need at least one listener to connect through."
+                action={
+                  <button type="button" className="primary" onClick={r.startCreate}>
+                    New inbound
+                  </button>
+                }
+              />
+            ) : (
+              <EmptyState title="No inbounds match" hint={`Nothing matches “${filter}”.`} />
+            )
+          }
+        />
       </div>
     </>
   );
 }
 
-function InboundRow({
-  inb,
-  onEdit,
-  onDelete,
-}: {
-  inb: Inbound;
-  onEdit: () => void;
-  onDelete: () => void;
-}) {
-  const users = inb.users ?? [];
-  return (
-    <tr>
-      <td className="mono">{inb.id}</td>
-      <td>
-        <span className="pill">{inb.protocol ?? ""}</span>
-      </td>
-      <td className="mono">{inb.listen}</td>
-      <td>{users.length === 0 ? "no auth" : users.length}</td>
-      <td className="mono">
-        {inb.policy?.chain_id || inb.policy?.pool_id
-          ? inb.policy.chain_id
-            ? `chain ${inb.policy.chain_id}`
-            : `pool ${inb.policy.pool_id}`
-          : "any"}
-      </td>
-      <td>
-        <button onClick={onEdit}>Edit</button>{" "}
-        <button className="danger" onClick={onDelete}>
-          Delete
-        </button>
-      </td>
-    </tr>
-  );
+function routingLabel(policy: Policy | undefined): string {
+  if (policy?.chain_id) return `chain ${policy.chain_id}`;
+  if (policy?.pool_id) return `pool ${policy.pool_id}`;
+  return "any";
 }
 
 function InboundForm({
   draft,
   setDraft,
+  fieldErrors,
+  idLocked,
 }: {
   draft: Inbound;
   setDraft: (d: Inbound) => void;
+  fieldErrors: Record<string, string>;
+  /** editing: the id is the resource's identity, so it can't change here */
+  idLocked: boolean;
 }) {
   const users = draft.users ?? [];
   const set = (patch: Partial<Inbound>) => setDraft({ ...draft, ...patch });
@@ -186,164 +205,169 @@ function InboundForm({
   return (
     <>
       <div className="row">
-        <div className="field">
-          <label htmlFor="inb-id">ID</label>
-          <input
-            id="inb-id"
-            type="text"
-            value={draft.id ?? ""}
-            onChange={(e) => set({ id: e.target.value })}
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="inb-proto">Protocol</label>
-          <select
-            id="inb-proto"
-            value={draft.protocol ?? "http"}
-            onChange={(e) => set({ protocol: e.target.value })}
-          >
-            <option value="http">http</option>
-            <option value="socks5">socks5</option>
-          </select>
-        </div>
-        <div className="field">
-          <label htmlFor="inb-listen">Listen address</label>
-          <input
-            id="inb-listen"
-            type="text"
-            value={draft.listen ?? ""}
-            placeholder="127.0.0.1:8080"
-            onChange={(e) => set({ listen: e.target.value })}
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="inb-chain">Default chain</label>
-          <input
-            id="inb-chain"
-            type="text"
-            value={policy.chain_id ?? ""}
-            placeholder="chain id (optional)"
-            onChange={(e) => setPolicy({ chain_id: e.target.value })}
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="inb-pool">Pool</label>
-          <input
-            id="inb-pool"
-            type="text"
-            value={policy.pool_id ?? ""}
-            placeholder="pool id (optional)"
-            onChange={(e) => setPolicy({ pool_id: e.target.value })}
-          />
-        </div>
+        <TextField
+          id="inb-id"
+          label="ID"
+          mono
+          value={draft.id ?? ""}
+          error={fieldErrors.id}
+          disabled={idLocked}
+          hint={idLocked ? "The ID is this inbound's identity." : undefined}
+          onChange={(id) => set({ id })}
+          placeholder="in-http"
+          autoFocus={!idLocked}
+        />
+        <SelectField
+          id="inb-proto"
+          label="Protocol"
+          value={draft.protocol ?? "http"}
+          options={["http", "socks5"]}
+          onChange={(protocol) => set({ protocol })}
+        />
+        <TextField
+          id="inb-listen"
+          label="Listen address"
+          mono
+          value={draft.listen ?? ""}
+          error={fieldErrors.listen}
+          placeholder="127.0.0.1:8080"
+          onChange={(listen) => set({ listen })}
+        />
+      </div>
+      <div className="row">
+        <TextField
+          id="inb-chain"
+          label="Default chain"
+          mono
+          value={policy.chain_id ?? ""}
+          placeholder="chain id (optional)"
+          onChange={(chain_id) => setPolicy({ chain_id })}
+        />
+        <TextField
+          id="inb-pool"
+          label="Pool"
+          mono
+          value={policy.pool_id ?? ""}
+          placeholder="pool id (optional)"
+          onChange={(pool_id) => setPolicy({ pool_id })}
+        />
       </div>
 
-      <div className="field">
-        <label>
-          Policy filters (narrow the pool for this inbound; ignored for chain
-          routing)
-        </label>
+      <FieldGroup
+        id="inb-filters"
+        label="Policy filters"
+        hint="Narrow the pool for this inbound; ignored when a chain routes the request."
+      >
         <div className="arr-editor">
           {filters.map((f, i) => (
-            <div className="filter-row" key={i} style={{ marginBottom: 10 }}>
-              <div className="row">
-                <div className="field">
-                  <label htmlFor={`inb-filter-type-${i}`}>Type</label>
-                  <select
-                    id={`inb-filter-type-${i}`}
-                    value={f.type ?? "location"}
-                    onChange={(e) => setFilter(i, { type: e.target.value })}
-                  >
-                    {FILTERS.map((t) => (
-                      <option key={t} value={t}>
-                        {t}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div className="field" style={{ flex: 2 }}>
-                  <KvEditor
-                    id={`inb-filter-params-${i}`}
-                    label="Params (JSON)"
-                    value={f.params}
-                    onChange={(params) => setFilter(i, { params })}
-                  />
-                </div>
-                <button
-                  type="button"
-                  className="danger"
-                  onClick={() =>
-                    setPolicy({ filters: filters.filter((_, j) => j !== i) })
-                  }
-                >
-                  Remove
-                </button>
-              </div>
+            <div className="item-row" key={i} style={{ alignItems: "start" }}>
+              <SelectField
+                id={`inb-filter-type-${i}`}
+                label="Type"
+                className="filter-type"
+                value={f.type ?? "location"}
+                options={[...FILTERS]}
+                onChange={(type) => setFilter(i, { type })}
+              />
+              <KvEditor
+                id={`inb-filter-params-${i}`}
+                label="Params (JSON)"
+                value={f.params}
+                onChange={(params) => setFilter(i, { params })}
+              />
+              <button
+                type="button"
+                className="danger"
+                onClick={() =>
+                  setPolicy({ filters: filters.filter((_, j) => j !== i) })
+                }
+              >
+                Remove
+              </button>
             </div>
           ))}
           <button
             type="button"
             onClick={() =>
-              setPolicy({
-                filters: [...filters, { type: "location", params: {} }],
-              })
+              setPolicy({ filters: [...filters, { type: "location", params: {} }] })
             }
           >
             Add policy filter
           </button>
         </div>
-      </div>
+      </FieldGroup>
 
-      <StringList
+      <FieldGroup
         id="inb-users"
-        label="Users (empty = no auth)"
-        placeholder="username"
-        values={users.map((u) => u.username ?? "")}
-        onChange={(names) =>
-          set({
-            users: names.map((name, i) => ({
-              username: name,
-              password: users[i]?.password ?? "",
-            })),
-          })
-        }
-      />
-
-      {users.map((u, i) => (
-        <div className="user-row" key={i}>
-          <input
-            type="text"
-            aria-label={`Password for ${u.username || `user ${i + 1}`}`}
-            placeholder="password"
-            value={u.password ?? ""}
-            onChange={(e) => setUser(i, { password: e.target.value })}
-          />
-          <input
-            type="text"
-            className="chain-input"
-            aria-label={`Per-user chain for ${u.username || `user ${i + 1}`}`}
-            placeholder="per-user chain (optional)"
-            value={u.policy?.chain_id ?? ""}
-            onChange={(e) =>
-              setUser(i, {
-                policy: { ...(u.policy ?? {}), chain_id: e.target.value },
-              })
-            }
-          />
-          <input
-            type="text"
-            className="chain-input"
-            aria-label={`Per-user pool for ${u.username || `user ${i + 1}`}`}
-            placeholder="per-user pool (optional)"
-            value={u.policy?.pool_id ?? ""}
-            onChange={(e) =>
-              setUser(i, {
-                policy: { ...(u.policy ?? {}), pool_id: e.target.value },
-              })
-            }
-          />
-        </div>
-      ))}
+        label="Users"
+        hint="Leave empty for no authentication."
+      >
+        {users.length > 0 && (
+          <div className="user-head" aria-hidden="true">
+            <span>Username</span>
+            <span>Password</span>
+            <span>Chain (optional)</span>
+            <span>Pool (optional)</span>
+          </div>
+        )}
+        {users.map((u, i) => (
+          <div className="user-row" key={i}>
+            <input
+              type="text"
+              className="mono"
+              aria-label={`Username ${i + 1}`}
+              placeholder="username"
+              value={u.username ?? ""}
+              onChange={(e) => setUser(i, { username: e.target.value })}
+            />
+            <input
+              type="text"
+              aria-label={`Password for ${u.username || `user ${i + 1}`}`}
+              placeholder="password"
+              value={u.password ?? ""}
+              onChange={(e) => setUser(i, { password: e.target.value })}
+            />
+            <input
+              type="text"
+              className="mono"
+              aria-label={`Per-user chain for ${u.username || `user ${i + 1}`}`}
+              placeholder="per-user chain"
+              value={u.policy?.chain_id ?? ""}
+              onChange={(e) =>
+                setUser(i, {
+                  policy: { ...(u.policy ?? {}), chain_id: e.target.value },
+                })
+              }
+            />
+            <input
+              type="text"
+              className="mono"
+              aria-label={`Per-user pool for ${u.username || `user ${i + 1}`}`}
+              placeholder="per-user pool"
+              value={u.policy?.pool_id ?? ""}
+              onChange={(e) =>
+                setUser(i, {
+                  policy: { ...(u.policy ?? {}), pool_id: e.target.value },
+                })
+              }
+            />
+            <button
+              type="button"
+              className="ghost icon"
+              aria-label={`Remove user ${u.username || i + 1}`}
+              onClick={() => set({ users: users.filter((_, j) => j !== i) })}
+            >
+              ×
+            </button>
+          </div>
+        ))}
+        <button
+          type="button"
+          onClick={() => set({ users: [...users, { username: "", password: "" }] })}
+        >
+          Add user
+        </button>
+      </FieldGroup>
     </>
   );
 }

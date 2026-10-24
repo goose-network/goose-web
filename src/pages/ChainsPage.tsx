@@ -1,137 +1,162 @@
 // src/pages/ChainsPage.tsx — CRUD over chains (ordered pool layers).
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useSdk } from "../sdk";
-import { errMessage, useAsync } from "../useAsync";
+import { useResource } from "../useResource";
+import { collect, required } from "../validate";
+import { PageHeader } from "../components/PageHeader";
+import { DataTable, EmptyState, type Column } from "../components/DataTable";
+import { FormCard } from "../components/FormCard";
+import { ConfirmButton } from "../components/ConfirmButton";
+import { Notice } from "../components/Notice";
+import { SearchInput, matches } from "../components/SearchInput";
+import { TextField } from "../components/fields";
 import { StringList } from "../components/StringList";
 import type { ChainSpec } from "@goose-network/goose-sdk";
 import { ChainProbesCard } from "./ChainProbesCard";
 
 export function ChainsPage() {
-  return (
-    <>
-      <h1 className="page-title">Chains</h1>
-      <p className="page-sub">
-        Ordered pool layers; a request traverses them in order.
-      </p>
-      <ChainsCard />
-      <ChainProbesCard />
-    </>
-  );
-}
-
-function ChainsCard() {
   const { goose } = useSdk();
-  const { data, error, loading, reload } = useAsync(
-    () => goose.listChains(),
-    [goose],
+  const [filter, setFilter] = useState("");
+
+  const r = useResource<ChainSpec>({
+    api: {
+      list: () => goose.listChains(),
+      save: (d) => goose.createChain(d),
+      remove: (id) => goose.deleteChain(id),
+    },
+    deps: [goose],
+    idOf: (c) => c.id ?? "",
+    blank: () => ({ id: "", layers: [] }),
+    normalize: (c) => ({ ...c, layers: c.layers ?? [] }),
+    noun: "chain",
+    validate: (d) =>
+      collect({
+        id: required(d.id, "An ID is required"),
+        layers:
+          (d.layers ?? []).length === 0 ? "layers" : null,
+      }),
+  });
+
+  const items = useMemo(
+    () =>
+      r.items.filter((c) =>
+        matches(`${c.id ?? ""} ${(c.layers ?? []).join(" ")}`, filter),
+      ),
+    [r.items, filter],
   );
-  const [draft, setDraft] = useState<ChainSpec | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
 
-  if (loading && data === undefined)
-    return <div className="loading">Loading…</div>;
-  if (error !== null)
-    return <div className="error-box">Failed to load chains: {error}</div>;
-
-  const startCreate = () => setDraft({ id: "", layers: [] });
-  const startEdit = (c: ChainSpec) => setDraft({ ...c, layers: c.layers ?? [] });
-
-  const save = async () => {
-    if (draft === null) return;
-    setSaving(true);
-    setSaveError(null);
-    try {
-      await goose.createChain(draft);
-      setDraft(null);
-      reload();
-    } catch (err) {
-      setSaveError(errMessage(err));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const del = async (id: string) => {
-    try {
-      await goose.deleteChain(id);
-      reload();
-    } catch (err) {
-      setSaveError(errMessage(err));
-    }
-  };
-
-  const items = data ?? [];
+  const columns: Array<Column<ChainSpec>> = [
+    { key: "id", header: "ID", className: "mono", render: (c) => c.id },
+    {
+      key: "layers",
+      header: "Layers",
+      className: "mono",
+      render: (c) => (c.layers ?? []).join(" → ") || "—",
+    },
+    {
+      key: "actions",
+      header: <span className="sr-only">Actions</span>,
+      className: "actions",
+      render: (c) => (
+        <>
+          <button type="button" className="ghost" onClick={() => r.startEdit(c)}>
+            Edit
+          </button>{" "}
+          <ConfirmButton onConfirm={() => void r.remove(c)} title={`Delete ${c.id ?? ""}`} />
+        </>
+      ),
+    },
+  ];
 
   return (
     <>
-      {saveError !== null && <div className="error-box">{saveError}</div>}
-      <div className="toolbar">
-        <button className="primary" onClick={startCreate}>
-          New chain
-        </button>
-      </div>
+      <PageHeader
+        title="Chains"
+        sub="Ordered pool layers; a request traverses them in order."
+        actions={
+          <button type="button" className="primary" onClick={r.startCreate}>
+            New chain
+          </button>
+        }
+      />
 
-      {draft !== null && (
-        <div className="card">
-          <h2>{draft.id === "" ? "New chain" : `Edit ${draft.id}`}</h2>
-          <div className="field">
-            <label htmlFor="chain-id">ID</label>
-            <input
-              id="chain-id"
-              type="text"
-              value={draft.id ?? ""}
-              onChange={(e) => setDraft({ ...draft, id: e.target.value })}
-            />
-          </div>
+      {r.draft !== null && (
+        <FormCard
+          title={r.isNew ? "New chain" : `Edit ${r.idOf(r.draft)}`}
+          onSave={() => void r.save()}
+          onCancel={r.cancel}
+          saving={r.saving}
+          dirty
+          error={r.saveError}
+          onDismissError={r.dismissSaveError}
+        >
+          <TextField
+            id="chain-id"
+            label="ID"
+            mono
+            value={r.draft.id ?? ""}
+            error={r.fieldErrors.id}
+            disabled={!r.isNew}
+            onChange={(id) => r.setDraft({ ...r.draft!, id })}
+            placeholder="chain-multi"
+            autoFocus={r.isNew}
+          />
           <StringList
             id="chain-layers"
             label="Pool layers (in order)"
             placeholder="pool id"
-            values={draft.layers ?? []}
-            onChange={(layers) => setDraft({ ...draft, layers })}
+            mono
+            ordered
+            values={r.draft.layers ?? []}
+            onChange={(layers) => r.setDraft({ ...r.draft!, layers })}
           />
-          <div className="toolbar">
-            <button className="primary" onClick={() => void save()} disabled={saving}>
-              {saving ? "Saving…" : "Save"}
-            </button>
-            <button onClick={() => setDraft(null)}>Cancel</button>
-          </div>
-        </div>
+          {r.fieldErrors.layers !== undefined && (
+            <Notice>Add at least one pool layer — an empty chain routes nothing.</Notice>
+          )}
+        </FormCard>
       )}
 
-      <div className="card">
-        {items.length === 0 ? (
-          <div className="empty">No chains configured.</div>
-        ) : (
-          <div className="table-wrap">
-            <table className="data">
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>Layers</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.map((c) => (
-                  <tr key={c.id}>
-                    <td className="mono">{c.id}</td>
-                    <td className="mono">{(c.layers ?? []).join(" → ") || "—"}</td>
-                    <td>
-                      <button onClick={() => startEdit(c)}>Edit</button>{" "}
-                      <button className="danger" onClick={() => void del(c.id ?? "")}>
-                        Delete
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+      <div className="filter-bar">
+        <SearchInput
+          id="chain-filter"
+          value={filter}
+          onChange={setFilter}
+          placeholder="Filter by id or layer…"
+        />
+        <span className="hint" style={{ margin: 0, alignSelf: "center" }}>
+          {items.length} of {r.items.length}
+        </span>
       </div>
+
+      <div className="card">
+        <DataTable
+          caption="Chains"
+          columns={columns}
+          rows={items}
+          rowKey={(c) => c.id ?? ""}
+          loading={r.loading}
+          error={r.error}
+          onRetry={r.reload}
+          empty={
+            r.items.length === 0 ? (
+              <EmptyState
+                title="No chains configured"
+                hint="Chains stack pools into multi-hop routes."
+                action={
+                  <button type="button" className="primary" onClick={r.startCreate}>
+                    New chain
+                  </button>
+                }
+              />
+            ) : (
+              <EmptyState title="No chains match" hint={`Nothing matches “${filter}”.`} />
+            )
+          }
+        />
+      </div>
+
+      <ChainProbesCard />
     </>
   );
 }

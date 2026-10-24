@@ -2,226 +2,236 @@
 // subscription-link quick-create form (the common case: paste a URL, get a
 // managed pool of proxies).
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useSdk } from "../sdk";
-import { errMessage, useAsync } from "../useAsync";
+import { useResource } from "../useResource";
+import { collect, httpUrl, required } from "../validate";
+import { PageHeader } from "../components/PageHeader";
+import { DataTable, EmptyState, type Column } from "../components/DataTable";
+import { FormCard } from "../components/FormCard";
+import { ConfirmButton } from "../components/ConfirmButton";
+import { SearchInput, matches } from "../components/SearchInput";
+import { SelectField, TextField } from "../components/fields";
 import { KvEditor } from "../components/KvEditor";
 import type { ProviderSpec } from "@goose-network/goose-sdk";
 
+const PLUGINS = ["subscription", "psiphon", "mihomo", "singbox"] as const;
+
 export function ProvidersPage() {
-  return (
-    <>
-      <h1 className="page-title">Providers</h1>
-      <p className="page-sub">
-        Dynamic outbound sources. A provider fetches its own proxy list and
-        feeds a managed pool; the engine keeps the pool in sync without a
-        restart.
-      </p>
-      <ProvidersCard />
-    </>
-  );
-}
-
-function ProvidersCard() {
   const { goose } = useSdk();
-  const { data, error, loading, reload } = useAsync(
-    () => goose.listProviders(),
-    [goose],
-  );
-  const [draft, setDraft] = useState<ProviderSpec | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
+  const [filter, setFilter] = useState("");
 
-  if (loading && data === undefined)
-    return <div className="loading">Loading…</div>;
-  if (error !== null)
-    return <div className="error-box">Failed to load providers: {error}</div>;
-
-  const startCreate = () =>
-    setDraft({
+  const r = useResource<ProviderSpec>({
+    api: {
+      list: () => goose.listProviders(),
+      save: (d) => goose.createProvider(d),
+      remove: (id) => goose.deleteProvider(id),
+    },
+    deps: [goose],
+    idOf: (p) => p.id ?? "",
+    blank: () => ({
       id: "",
       provider: "subscription",
       pool_id: "",
       config: { url: "" },
-    });
-  const startEdit = (p: ProviderSpec) => setDraft({ ...p, config: { ...(p.config ?? {}) } });
+    }),
+    normalize: (p) => ({ ...p, config: { ...(p.config ?? {}) } }),
+    noun: "provider",
+    validate: (d) =>
+      collect({
+        id: required(d.id, "An ID is required"),
+        url:
+          d.provider === "subscription"
+            ? httpUrl(
+                typeof d.config?.url === "string" ? d.config.url : "",
+                "A subscription needs an http(s) URL",
+              )
+            : null,
+      }),
+  });
 
-  const save = async () => {
-    if (draft === null) return;
-    setSaving(true);
-    setSaveError(null);
-    try {
-      await goose.createProvider(draft);
-      setDraft(null);
-      reload();
-    } catch (err) {
-      setSaveError(errMessage(err));
-    } finally {
-      setSaving(false);
-    }
-  };
+  const items = useMemo(
+    () =>
+      r.items.filter((p) =>
+        matches(
+          `${p.id ?? ""} ${p.provider ?? ""} ${p.pool_id ?? ""} ${urlOf(p)}`,
+          filter,
+        ),
+      ),
+    [r.items, filter],
+  );
 
-  const del = async (id: string) => {
-    try {
-      await goose.deleteProvider(id);
-      reload();
-    } catch (err) {
-      setSaveError(errMessage(err));
-    }
-  };
-
-  const items = data ?? [];
+  const columns: Array<Column<ProviderSpec>> = [
+    { key: "id", header: "ID", className: "mono", render: (p) => p.id },
+    {
+      key: "plugin",
+      header: "Plugin",
+      render: (p) => <span className="pill">{p.provider ?? ""}</span>,
+    },
+    { key: "pool", header: "Pool", className: "mono", render: (p) => p.pool_id || "default" },
+    {
+      key: "config",
+      header: "Subscription URL",
+      className: "mono ellipsis",
+      render: (p) => <span title={urlOf(p)}>{urlOf(p) || "—"}</span>,
+    },
+    {
+      key: "actions",
+      header: <span className="sr-only">Actions</span>,
+      className: "actions",
+      render: (p) => (
+        <>
+          <button type="button" className="ghost" onClick={() => r.startEdit(p)}>
+            Edit
+          </button>{" "}
+          <ConfirmButton onConfirm={() => void r.remove(p)} title={`Delete ${p.id ?? ""}`} />
+        </>
+      ),
+    },
+  ];
 
   return (
     <>
-      {saveError !== null && <div className="error-box">{saveError}</div>}
-      <div className="toolbar">
-        <button className="primary" onClick={startCreate}>
-          New provider
-        </button>
-      </div>
+      <PageHeader
+        title="Providers"
+        sub="Dynamic outbound sources. A provider fetches its own proxy list and feeds a managed pool; the engine keeps the pool in sync without a restart."
+        actions={
+          <button type="button" className="primary" onClick={r.startCreate}>
+            New provider
+          </button>
+        }
+      />
 
-      {draft !== null && (
-        <div className="card">
-          <h2>{draft.id === "" ? "New provider" : `Edit ${draft.id}`}</h2>
-          <ProviderForm draft={draft} setDraft={setDraft} />
-          <div className="toolbar">
-            <button className="primary" onClick={() => void save()} disabled={saving}>
-              {saving ? "Saving…" : "Save"}
-            </button>
-            <button onClick={() => setDraft(null)}>Cancel</button>
-          </div>
-        </div>
+      {r.draft !== null && (
+        <FormCard
+          title={r.isNew ? "New provider" : `Edit ${r.idOf(r.draft)}`}
+          onSave={() => void r.save()}
+          onCancel={r.cancel}
+          saving={r.saving}
+          dirty
+          error={r.saveError}
+          onDismissError={r.dismissSaveError}
+        >
+          <ProviderForm
+            draft={r.draft}
+            setDraft={r.setDraft}
+            fieldErrors={r.fieldErrors}
+            idLocked={!r.isNew}
+          />
+        </FormCard>
       )}
 
+      <div className="filter-bar">
+        <SearchInput
+          id="provider-filter"
+          value={filter}
+          onChange={setFilter}
+          placeholder="Filter by id, plugin, pool, url…"
+        />
+        <span className="hint" style={{ margin: 0, alignSelf: "center" }}>
+          {items.length} of {r.items.length}
+        </span>
+      </div>
+
       <div className="card">
-        {items.length === 0 ? (
-          <div className="empty">No providers configured.</div>
-        ) : (
-          <div className="table-wrap">
-            <table className="data">
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>Plugin</th>
-                  <th>Pool</th>
-                  <th>Config</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.map((p) => (
-                  <ProviderRow
-                    key={p.id}
-                    provider={p}
-                    onEdit={() => startEdit(p)}
-                    onDelete={() => void del(p.id ?? "")}
-                  />
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+        <DataTable
+          caption="Dynamic outbound providers"
+          columns={columns}
+          rows={items}
+          rowKey={(p) => p.id ?? ""}
+          loading={r.loading}
+          error={r.error}
+          onRetry={r.reload}
+          empty={
+            r.items.length === 0 ? (
+              <EmptyState
+                title="No providers configured"
+                hint="Paste a subscription URL to import a managed pool of proxies."
+                action={
+                  <button type="button" className="primary" onClick={r.startCreate}>
+                    New provider
+                  </button>
+                }
+              />
+            ) : (
+              <EmptyState title="No providers match" hint={`Nothing matches “${filter}”.`} />
+            )
+          }
+        />
       </div>
     </>
   );
 }
 
-function ProviderRow({
-  provider,
-  onEdit,
-  onDelete,
-}: {
-  provider: ProviderSpec;
-  onEdit: () => void;
-  onDelete: () => void;
-}) {
-  const cfg = provider.config ?? {};
-  const url = typeof cfg.url === "string" ? cfg.url : "";
-  return (
-    <tr>
-      <td className="mono">{provider.id}</td>
-      <td>
-        <span className="pill">{provider.provider ?? ""}</span>
-      </td>
-      <td className="mono">{provider.pool_id || "default"}</td>
-      <td className="mono ellipsis">{url || "—"}</td>
-      <td>
-        <button onClick={onEdit}>Edit</button>{" "}
-        <button className="danger" onClick={onDelete}>
-          Delete
-        </button>
-      </td>
-    </tr>
-  );
+function urlOf(p: ProviderSpec): string {
+  const u = p.config?.url;
+  return typeof u === "string" ? u : "";
 }
 
 function ProviderForm({
   draft,
   setDraft,
+  fieldErrors,
+  idLocked,
 }: {
   draft: ProviderSpec;
   setDraft: (d: ProviderSpec) => void;
+  fieldErrors: Record<string, string>;
+  idLocked: boolean;
 }) {
   const set = (patch: Partial<ProviderSpec>) => setDraft({ ...draft, ...patch });
   const cfg = draft.config ?? {};
   const setCfg = (next: Record<string, unknown>) => set({ config: next });
 
   return (
-    <div className="row">
-      <div className="field">
-        <label htmlFor="prov-id">ID</label>
-        <input
+    <>
+      <div className="row">
+        <TextField
           id="prov-id"
-          type="text"
+          label="ID"
+          mono
           value={draft.id ?? ""}
-          onChange={(e) => set({ id: e.target.value })}
+          error={fieldErrors.id}
+          disabled={idLocked}
+          onChange={(id) => set({ id })}
+          placeholder="sub-main"
+          autoFocus={!idLocked}
         />
-      </div>
-      <div className="field">
-        <label htmlFor="prov-plugin">Plugin</label>
-        <select
+        <SelectField
           id="prov-plugin"
+          label="Plugin"
           value={draft.provider ?? "subscription"}
-          onChange={(e) => set({ provider: e.target.value })}
-        >
-          <option value="subscription">subscription</option>
-          <option value="psiphon">psiphon</option>
-          <option value="mihomo">mihomo</option>
-          <option value="singbox">singbox</option>
-        </select>
-      </div>
-      <div className="field">
-        <label htmlFor="prov-pool">Pool ID</label>
-        <input
+          options={[...PLUGINS]}
+          onChange={(provider) => set({ provider })}
+        />
+        <TextField
           id="prov-pool"
-          type="text"
+          label="Pool ID"
+          mono
           value={draft.pool_id ?? ""}
           placeholder="defaults to the “default” pool"
-          onChange={(e) => set({ pool_id: e.target.value })}
+          onChange={(pool_id) => set({ pool_id })}
         />
       </div>
-      <div className="field">
-        <label htmlFor="prov-url">Subscription URL</label>
-        <input
+      <div className="row">
+        <TextField
           id="prov-url"
-          type="text"
+          label="Subscription URL"
+          mono
+          type="url"
           value={typeof cfg.url === "string" ? cfg.url : ""}
+          error={fieldErrors.url}
           placeholder="https://example.com/sub"
-          onChange={(e) => setCfg({ ...cfg, url: e.target.value })}
+          onChange={(url) => setCfg({ ...cfg, url })}
         />
-      </div>
-      <div className="field">
-        <label htmlFor="prov-prefix">ID prefix</label>
-        <input
+        <TextField
           id="prov-prefix"
-          type="text"
+          label="ID prefix"
+          mono
           value={typeof cfg.prefix === "string" ? cfg.prefix : ""}
           placeholder="sub (optional)"
-          onChange={(e) =>
-            e.target.value === ""
-              ? setCfg({ url: cfg.url })
-              : setCfg({ ...cfg, prefix: e.target.value })
+          onChange={(prefix) =>
+            prefix === "" ? setCfg({ url: cfg.url }) : setCfg({ ...cfg, prefix })
           }
         />
       </div>
@@ -231,6 +241,6 @@ function ProviderForm({
         value={cfg}
         onChange={setCfg}
       />
-    </div>
+    </>
   );
 }

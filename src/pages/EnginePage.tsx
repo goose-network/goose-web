@@ -1,17 +1,148 @@
-// src/pages/EnginePage.tsx — overview + engine-level config editor.
+// src/pages/EnginePage.tsx — overview: what the engine is running right now,
+// what's configured, and the engine-level config editor.
 
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { useSdk } from "../sdk";
 import { errMessage, useAsync } from "../useAsync";
+import { PageHeader } from "../components/PageHeader";
+import { Notice } from "../components/Notice";
+import { SelectField, TextField } from "../components/fields";
+import { TableSkeleton } from "../components/DataTable";
 import type { Engine } from "@goose-network/goose-sdk";
 
 export function EnginePage() {
   return (
     <>
-      <h1 className="page-title">Overview</h1>
-      <p className="page-sub">Engine configuration, applied live.</p>
+      <PageHeader
+        title="Overview"
+        sub="What the engine is running right now, and the configuration behind it. Changes apply live."
+      />
+      <EngineStatusCard />
+      <ResourcesCard />
       <EngineCard />
     </>
+  );
+}
+
+/** Read-only facts about the live engine, straight from GET /api/engine. */
+function EngineStatusCard() {
+  const { goose, connection, connectionError, connecting } = useSdk();
+  const { data, error, loading } = useAsync(() => goose.getEngine(), [goose]);
+
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h2>Engine</h2>
+        <div className="spacer" />
+        <span className={`pill ${connectionError === null ? "ok" : "fail"}`}>
+          {connecting
+            ? "connecting…"
+            : connectionError === null
+              ? "connected"
+              : "unreachable"}
+        </span>
+      </div>
+      {error !== null ? (
+        <Notice>
+          Failed to load engine: {error}{" "}
+          <span className="hint" style={{ margin: 0 }}>
+            {connection.baseUrl === "" ? "same-origin" : connection.baseUrl}
+          </span>
+        </Notice>
+      ) : data === undefined ? (
+        loading ? (
+          <TableSkeleton cols={4} rows={2} />
+        ) : null
+      ) : (
+        <dl className="def-grid">
+          <div>
+            <dt>Network stack</dt>
+            <dd>{data.stack || "default"}</dd>
+          </div>
+          <div>
+            <dt>Admin API</dt>
+            <dd className="mono">{data.api?.listen || "—"}</dd>
+          </div>
+          <div>
+            <dt>Admin auth</dt>
+            <dd>
+              {data.api?.token ? (
+                <span className="pill ok">token required</span>
+              ) : (
+                <span className="pill warn">open</span>
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>Metrics database</dt>
+            <dd className="mono">{data.db || "—"}</dd>
+          </div>
+          <div>
+            <dt>Geo database</dt>
+            <dd className="mono">
+              {data.geo?.type ? `${data.geo.type} ${data.geo.path ?? ""}` : "disabled"}
+            </dd>
+          </div>
+          <div>
+            <dt>Scheduled exit checks</dt>
+            <dd>
+              {data.exit_checks?.enabled === true ? (
+                <span className="pill ok">
+                  {data.exit_checks.cron || `every ${data.exit_checks.interval_seconds ?? 0}s`}
+                </span>
+              ) : (
+                <span className="pill">off</span>
+              )}
+            </dd>
+          </div>
+        </dl>
+      )}
+    </div>
+  );
+}
+
+/** Counts per resource, so the overview answers "what is configured?". */
+function ResourcesCard() {
+  const { goose } = useSdk();
+  const { data, loading } = useAsync(
+    () =>
+      Promise.all([
+        goose.listInbounds(),
+        goose.listOutbounds(),
+        goose.listPools(),
+        goose.listChains(),
+        goose.listProviders(),
+      ]),
+    [goose],
+  );
+
+  const rows: Array<{ to: string; label: string; count: number | undefined; hint: string }> =
+    [
+      { to: "/inbounds", label: "Inbounds", count: data?.[0].length, hint: "client listeners" },
+      { to: "/outbounds", label: "Outbounds", count: data?.[1].length, hint: "proxy servers" },
+      { to: "/pools", label: "Pools", count: data?.[2].length, hint: "outbound sets" },
+      { to: "/chains", label: "Chains", count: data?.[3].length, hint: "multi-hop routes" },
+      { to: "/providers", label: "Providers", count: data?.[4].length, hint: "dynamic sources" },
+    ];
+
+  return (
+    <div className="card">
+      <h2>Configured resources</h2>
+      {loading && data === undefined ? (
+        <TableSkeleton cols={5} rows={1} />
+      ) : (
+        <div className="count-grid">
+          {rows.map((r) => (
+            <Link className="count-tile" to={r.to} key={r.to}>
+              <span className="count-value">{r.count ?? "—"}</span>
+              <span className="count-label">{r.label}</span>
+              <span className="count-hint">{r.hint}</span>
+            </Link>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -30,8 +161,15 @@ function EngineCard() {
     if (data !== undefined && draft === null) setDraft(normalize(data));
   }, [data, draft]);
 
-  if (loading && data === undefined) return <div className="loading">Loading…</div>;
-  if (error !== null) return <div className="error-box">Failed to load engine: {error}</div>;
+  if (loading && data === undefined)
+    return (
+      <div className="card">
+        <h2>Engine configuration</h2>
+        <TableSkeleton cols={3} rows={2} />
+      </div>
+    );
+  if (error !== null)
+    return <Notice>Failed to load engine: {error}</Notice>;
   if (draft === null) return null;
 
   const set = (patch: Partial<Engine>) => setDraft({ ...draft, ...patch });
@@ -53,110 +191,68 @@ function EngineCard() {
 
   return (
     <div className="card">
-      <h2>Engine</h2>
+      <h2>Engine configuration</h2>
       <div className="row">
-        <div className="field">
-          <label htmlFor="engine-stack">Network stack</label>
-          <select
-            id="engine-stack"
-            value={draft.stack ?? ""}
-            onChange={(e) => set({ stack: e.target.value })}
-          >
-            <option value="">(default)</option>
-            <option value="system">system</option>
-            <option value="gvisor">gvisor</option>
-          </select>
-        </div>
-        <div className="field">
-          <label htmlFor="engine-db">Metrics database</label>
-          <input
-            id="engine-db"
-            type="text"
-            value={draft.db ?? ""}
-            onChange={(e) => set({ db: e.target.value })}
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="engine-api-listen">Admin API listen</label>
-          <input
-            id="engine-api-listen"
-            type="text"
-            value={draft.api?.listen ?? ""}
-            onChange={(e) =>
-              set({
-                api: {
-                  ...(draft.api ?? {}),
-                  listen: e.target.value,
-                },
-              })
-            }
-          />
-        </div>
+        <SelectField
+          id="engine-stack"
+          label="Network stack"
+          value={draft.stack ?? ""}
+          emptyOption="(default)"
+          options={["system", "gvisor"]}
+          onChange={(stack) => set({ stack })}
+        />
+        <TextField
+          id="engine-db"
+          label="Metrics database"
+          mono
+          value={draft.db ?? ""}
+          onChange={(db) => set({ db })}
+        />
+        <TextField
+          id="engine-api-listen"
+          label="Admin API listen"
+          mono
+          value={draft.api?.listen ?? ""}
+          onChange={(listen) => set({ api: { ...(draft.api ?? {}), listen } })}
+        />
       </div>
       <div className="row">
-        <div className="field">
-          <label htmlFor="engine-api-token">Admin API token (empty disables auth)</label>
-          <input
-            id="engine-api-token"
-            type="password"
-            value={draft.api?.token ?? ""}
-            onChange={(e) =>
-              set({
-                api: {
-                  ...(draft.api ?? {}),
-                  token: e.target.value,
-                },
-              })
-            }
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="engine-geo-type">Geo database type</label>
-          <select
-            id="engine-geo-type"
-            value={draft.geo?.type ?? ""}
-            onChange={(e) =>
-              set({
-                geo: {
-                  ...(draft.geo ?? {}),
-                  type: e.target.value,
-                },
-              })
-            }
-          >
-            <option value="">(disabled)</option>
-            <option value="mmdb">mmdb</option>
-            <option value="qqwry">qqwry</option>
-            <option value="zxinc">zxinc</option>
-          </select>
-        </div>
-        <div className="field">
-          <label htmlFor="engine-geo-path">Geo database path</label>
-          <input
-            id="engine-geo-path"
-            type="text"
-            value={draft.geo?.path ?? ""}
-            onChange={(e) =>
-              set({
-                geo: {
-                  ...(draft.geo ?? {}),
-                  path: e.target.value,
-                },
-              })
-            }
-          />
-        </div>
+        <TextField
+          id="engine-api-token"
+          label="Admin API token"
+          hint="Empty disables auth."
+          type="password"
+          autoComplete="new-password"
+          value={draft.api?.token ?? ""}
+          onChange={(token) => set({ api: { ...(draft.api ?? {}), token } })}
+        />
+        <SelectField
+          id="engine-geo-type"
+          label="Geo database type"
+          value={draft.geo?.type ?? ""}
+          emptyOption="(disabled)"
+          options={["mmdb", "qqwry", "zxinc"]}
+          onChange={(type) => set({ geo: { ...(draft.geo ?? {}), type } })}
+        />
+        <TextField
+          id="engine-geo-path"
+          label="Geo database path"
+          mono
+          value={draft.geo?.path ?? ""}
+          onChange={(path) => set({ geo: { ...(draft.geo ?? {}), path } })}
+        />
       </div>
-      {saveError !== null && <div className="error-box">{saveError}</div>}
-      <div className="toolbar">
+      {saveError !== null && <Notice onDismiss={() => setSaveError(null)}>{saveError}</Notice>}
+      <div className="toolbar" style={{ marginBottom: 0 }}>
         <button
+          type="button"
           className="primary"
           onClick={() => void save()}
           disabled={saving || loading}
         >
           {saving ? "Saving…" : "Save engine config"}
         </button>
-        <button onClick={() => data !== undefined && setDraft(normalize(data))}>
+        <button type="button" onClick={() => data !== undefined && setDraft(normalize(data))}>
           Reset
         </button>
       </div>

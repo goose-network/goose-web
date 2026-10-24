@@ -10,6 +10,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSdk } from "../sdk";
 import { errMessage, useAsync } from "../useAsync";
+import { PageHeader } from "../components/PageHeader";
+import { DataTable, EmptyState, type Column } from "../components/DataTable";
+import { Notice, useToast } from "../components/Notice";
+import { CheckField, NumberField, SelectField, TextField } from "../components/fields";
 import { StringList } from "../components/StringList";
 import { formatDuration, formatTime } from "../format";
 import type { Engine, ExitCheck } from "@goose-network/goose-sdk";
@@ -32,14 +36,16 @@ export function latestPerOutbound(checks: ExitCheck[]): Map<string, ExitCheck> {
   return latest;
 }
 
+const ROW_OPTIONS = [100, 500, 1000, 5000];
+const PAGE = 50;
+
 export function ExitChecksPage() {
   return (
     <>
-      <h1 className="page-title">Exit IP</h1>
-      <p className="page-sub">
-        The public IP observed at each outbound's exit — checked through the
-        proxy itself, recorded over time, on a cron schedule.
-      </p>
+      <PageHeader
+        title="Exit IP"
+        sub="The public IP observed at each outbound's exit — checked through the proxy itself, recorded over time, on a cron schedule."
+      />
       <ExitChecksCard />
     </>
   );
@@ -47,6 +53,7 @@ export function ExitChecksPage() {
 
 function ExitChecksCard() {
   const { goose } = useSdk();
+  const { toast } = useToast();
   const [rows, setRows] = useState<number>(200);
   const [outboundFilter, setOutboundFilter] = useState<string>("");
 
@@ -65,6 +72,7 @@ function ExitChecksCard() {
     setRunError(null);
     try {
       await goose.runExitChecks();
+      toast("Exit checks started — results arrive in a few seconds");
       // Results land in the background; poll shortly after.
       setTimeout(() => checks.reload(), 1500);
       setTimeout(() => checks.reload(), 4000);
@@ -82,144 +90,203 @@ function ExitChecksCard() {
 
   return (
     <>
-      <div className="metrics-filters">
-        <div className="field">
-          <label htmlFor="exit-outbound">Outbound</label>
-          <select
-            id="exit-outbound"
-            value={outboundFilter}
-            onChange={(e) => setOutboundFilter(e.target.value)}
-          >
-            <option value="">All</option>
-            {outbounds.map((id) => (
-              <option key={id} value={id}>
-                {id}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="field">
-          <label htmlFor="exit-rows">Rows fetched</label>
-          <select
-            id="exit-rows"
-            value={rows}
-            onChange={(e) => setRows(Number(e.target.value))}
-          >
-            {[100, 500, 1000, 5000].map((r) => (
-              <option key={r} value={r}>
-                last {r}
-              </option>
-            ))}
-          </select>
-        </div>
+      <div className="filter-bar">
+        <SelectField
+          id="exit-outbound"
+          label="Outbound"
+          value={outboundFilter}
+          emptyOption="All outbounds"
+          options={outbounds}
+          onChange={setOutboundFilter}
+        />
+        <SelectField
+          id="exit-rows"
+          label="History depth"
+          value={String(rows)}
+          options={ROW_OPTIONS.map((r) => ({ value: String(r), label: `last ${r}` }))}
+          onChange={(v) => setRows(Number(v))}
+        />
         <div className="spacer" />
-        <button onClick={runNow} disabled={running}>
-          {running ? "Starting…" : "Check now"}
-        </button>
-        <button onClick={checks.reload} disabled={checks.loading}>
+        <button type="button" onClick={checks.reload} disabled={checks.loading}>
           {checks.loading ? "Refreshing…" : "Refresh"}
+        </button>
+        <button
+          type="button"
+          className="primary"
+          onClick={() => void runNow()}
+          disabled={running}
+        >
+          {running ? "Starting…" : "Check now"}
         </button>
       </div>
 
-      {runError !== null && <div className="error-box">{runError}</div>}
-      {checks.error !== null && (
-        <div className="error-box">Failed to load exit checks: {checks.error}</div>
+      {runError !== null && (
+        <Notice onDismiss={() => setRunError(null)}>{runError}</Notice>
       )}
 
-      <LatestExits latest={latestByOutbound} />
+      <LatestExits latest={latestByOutbound} loading={checks.loading} />
 
-      <ExitHistory checks={filtered} loading={checks.loading} />
+      <ExitHistory
+        checks={filtered}
+        total={items.length}
+        loading={checks.loading}
+        error={checks.error}
+        onRetry={checks.reload}
+        filteredBy={outboundFilter}
+        onResetFilter={() => setOutboundFilter("")}
+      />
 
       <ExitCheckConfigCard engine={engine} />
     </>
   );
 }
 
+const latestColumns: Array<Column<[string, ExitCheck]>> = [
+  { key: "id", header: "Outbound", className: "mono", render: ([id]) => id },
+  {
+    key: "ip",
+    header: "Exit IP",
+    className: "mono",
+    render: ([, c]) =>
+      c.success === true ? (
+        c.exitIP || "—"
+      ) : (
+        <span className="status-bad">failed: {c.error || "error"}</span>
+      ),
+  },
+  { key: "site", header: "Site", className: "mono", render: ([, c]) => c.site || "—" },
+  { key: "when", header: "Checked", className: "nowrap", render: ([, c]) => formatTime(c.startedAt ?? "") },
+  {
+    key: "latency",
+    header: "Latency",
+    className: "num",
+    render: ([, c]) => (c.success === true ? formatDuration(c.latency ?? 0) : "—"),
+  },
+];
+
 // LatestExits summarizes the most recent exit IP per outbound.
 function LatestExits({
   latest,
+  loading,
 }: {
   latest: Map<string, ExitCheck>;
+  loading: boolean;
 }) {
   const rows = [...latest.entries()].sort(([a], [b]) => a.localeCompare(b));
-  if (rows.length === 0) return null;
+  if (rows.length === 0 && !loading) return null;
   return (
     <div className="card">
-      <h2>Latest exit IP per outbound</h2>
-      <table className="table">
-        <thead>
-          <tr>
-            <th>Outbound</th>
-            <th>Exit IP</th>
-            <th>Site</th>
-            <th>Checked</th>
-            <th>Latency</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map(([id, c]) => (
-            <tr key={id}>
-              <td>{id}</td>
-              <td className={c.success === true ? "ok" : "bad"}>
-                {c.success === true ? c.exitIP : `failed: ${c.error ?? "error"}`}
-              </td>
-              <td>{c.site ?? ""}</td>
-              <td>{formatTime(c.startedAt ?? "")}</td>
-              <td>{formatDuration(c.latency ?? 0)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <h2>Current exit IP per outbound</h2>
+      <DataTable
+        caption="Latest exit IP per outbound"
+        columns={latestColumns}
+        rows={rows}
+        rowKey={([id]) => id}
+        loading={loading}
+      />
     </div>
   );
 }
 
-// ExitHistory is the full per-check record list.
+// ExitHistory is the full per-check record list, paged so 5000 rows don't
+// turn into a 5000-row DOM.
 function ExitHistory({
   checks,
+  total,
   loading,
+  error,
+  onRetry,
+  filteredBy,
+  onResetFilter,
 }: {
   checks: ExitCheck[];
+  total: number;
   loading: boolean;
+  error: string | null;
+  onRetry: () => void;
+  filteredBy: string;
+  onResetFilter: () => void;
 }) {
+  const [limit, setLimit] = useState(PAGE);
+  useEffect(() => setLimit(PAGE), [filteredBy, total]);
+  const visible = checks.slice(0, limit);
+
+  const columns: Array<Column<ExitCheck>> = [
+    { key: "when", header: "Time", className: "nowrap", render: (c) => formatTime(c.startedAt ?? "") },
+    { key: "ob", header: "Outbound", className: "mono", render: (c) => c.outboundID || "—" },
+    { key: "site", header: "Site", className: "mono", render: (c) => c.site || "—" },
+    {
+      key: "ip",
+      header: "Exit IP",
+      className: "mono",
+      render: (c) => (c.success === true ? c.exitIP || "—" : "—"),
+    },
+    {
+      key: "result",
+      header: "Result",
+      render: (c) =>
+        c.success === true ? (
+          <span className="pill ok">ok</span>
+        ) : (
+          <span className="pill fail" title={c.error ?? ""}>
+            {c.error || "failed"}
+          </span>
+        ),
+    },
+    {
+      key: "latency",
+      header: "Latency",
+      className: "num",
+      render: (c) => (c.success === true ? formatDuration(c.latency ?? 0) : "—"),
+    },
+  ];
+
   return (
-    <div className="card" style={loading ? { opacity: 0.5 } : undefined}>
+    <div className="card">
       <h2>History</h2>
-      {checks.length === 0 ? (
-        <div className="empty">
-          No exit-IP checks recorded yet. Enable scheduled checks below or
-          press “Check now”.
-        </div>
-      ) : (
-        <table className="table">
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>Outbound</th>
-              <th>Site</th>
-              <th>Exit IP</th>
-              <th>Result</th>
-              <th>Latency</th>
-            </tr>
-          </thead>
-          <tbody>
-            {checks.map((c, i) => (
-              <tr key={c.id ?? i}>
-                <td>{formatTime(c.startedAt ?? "")}</td>
-                <td>{c.outboundID ?? ""}</td>
-                <td>{c.site ?? ""}</td>
-                <td className={c.success === true ? "ok" : "bad"}>
-                  {c.success === true ? c.exitIP : "—"}
-                </td>
-                <td className={c.success === true ? "ok" : "bad"}>
-                  {c.success === true ? "ok" : c.error ?? "failed"}
-                </td>
-                <td>{formatDuration(c.latency ?? 0)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
+      <DataTable
+        caption="Exit-IP check history"
+        columns={columns}
+        rows={visible}
+        rowKey={(c) => `${c.id ?? ""}-${c.startedAt ?? ""}-${c.outboundID ?? ""}`}
+        loading={loading}
+        error={error}
+        onRetry={onRetry}
+        empty={
+          total === 0 ? (
+            <EmptyState
+              title="No exit-IP checks recorded yet"
+              hint="Press “Check now” to probe every outbound, or enable the schedule below."
+            />
+          ) : (
+            <EmptyState
+              title="No checks for this outbound"
+              hint={`Nothing recorded for “${filteredBy}”.`}
+              action={
+                <button type="button" className="ghost" onClick={onResetFilter}>
+                  Show all outbounds
+                </button>
+              }
+            />
+          )
+        }
+        foot={
+          checks.length > 0 ? (
+            <div className="table-foot">
+              <span>
+                Showing {visible.length} of {checks.length}
+                {filteredBy === "" && total !== checks.length ? ` (filtered from ${total})` : ""}
+              </span>
+              <div className="spacer" />
+              {checks.length > visible.length && (
+                <button type="button" className="ghost" onClick={() => setLimit(limit + PAGE)}>
+                  Load {Math.min(PAGE, checks.length - visible.length)} more
+                </button>
+              )}
+            </div>
+          ) : undefined
+        }
+      />
     </div>
   );
 }
@@ -233,11 +300,11 @@ function ExitCheckConfigCard({
   engine: ReturnType<typeof useAsync<Engine>>;
 }) {
   const { goose } = useSdk();
+  const { toast } = useToast();
   type ExitCheckCfg = NonNullable<Engine["exit_checks"]>;
   const [draft, setDraft] = useState<ExitCheckCfg | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [saved, setSaved] = useState(false);
 
   useEffect(() => {
     if (engine.data !== undefined && draft === null) {
@@ -246,22 +313,19 @@ function ExitCheckConfigCard({
   }, [engine.data, draft]);
 
   if (engine.error !== null)
-    return (
-      <div className="error-box">Failed to load engine config: {engine.error}</div>
-    );
+    return <Notice>Failed to load engine config: {engine.error}</Notice>;
   if (draft === null) return null;
 
-  const set = (patch: Partial<NonNullable<Engine["exit_checks"]>>) =>
-    setDraft({ ...draft, ...patch });
+  const set = (patch: Partial<ExitCheckCfg>) => setDraft({ ...draft, ...patch });
 
   const save = async () => {
     if (engine.data === undefined) return;
     setSaving(true);
     setSaveError(null);
-    setSaved(false);
     try {
       await goose.setEngine({ ...engine.data, exit_checks: draft });
-      setSaved(true);
+      toast("Exit-check schedule saved");
+      setDraft(null);
       engine.reload();
     } catch (err) {
       setSaveError(errMessage(err));
@@ -275,72 +339,77 @@ function ExitCheckConfigCard({
       <h2>Scheduled checks</h2>
       <p className="hint">
         The engine dials each outbound and asks a check site for the exit IP.
-        Batches rotate round-robin across the site list so large tests
-        spread load instead of hammering (or DDoSing) a single site.
+        Batches rotate round-robin across the site list so large tests spread
+        load instead of hammering (or DDoSing) a single site.
       </p>
       <div className="row">
-        <div className="field">
-          <label htmlFor="exit-enabled">Enabled</label>
-          <input
-            id="exit-enabled"
-            type="checkbox"
-            checked={draft.enabled === true}
-            onChange={(e) => set({ enabled: e.target.checked })}
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="exit-cron">Cron (5-field, overrides interval)</label>
-          <input
-            id="exit-cron"
-            type="text"
-            placeholder="*/15 * * * *"
-            value={draft.cron ?? ""}
-            onChange={(e) => set({ cron: e.target.value })}
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="exit-interval">Interval (seconds)</label>
-          <input
-            id="exit-interval"
-            type="number"
-            min={60}
-            value={draft.interval_seconds ?? 0}
-            onChange={(e) => set({ interval_seconds: Number(e.target.value) })}
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="exit-timeout">Per-check timeout (s)</label>
-          <input
-            id="exit-timeout"
-            type="number"
-            min={1}
-            value={draft.timeout_seconds ?? 0}
-            onChange={(e) => set({ timeout_seconds: Number(e.target.value) })}
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="exit-concurrency">Concurrency</label>
-          <input
-            id="exit-concurrency"
-            type="number"
-            min={1}
-            value={draft.concurrency ?? 0}
-            onChange={(e) => set({ concurrency: Number(e.target.value) })}
-          />
-        </div>
+        <CheckField
+          id="exit-enabled"
+          label="Enabled"
+          checked={draft.enabled === true}
+          onChange={(enabled) => set({ enabled })}
+        />
+        <TextField
+          id="exit-cron"
+          label="Cron"
+          hint="5-field; overrides the interval when set."
+          mono
+          placeholder="*/15 * * * *"
+          value={draft.cron ?? ""}
+          onChange={(cron) => set({ cron })}
+        />
+        <NumberField
+          id="exit-interval"
+          label="Interval (seconds)"
+          min={60}
+          placeholder="900"
+          value={draft.interval_seconds ?? 0}
+          onChange={(interval_seconds) => set({ interval_seconds })}
+        />
+        <NumberField
+          id="exit-timeout"
+          label="Per-check timeout (s)"
+          min={1}
+          placeholder="10"
+          value={draft.timeout_seconds ?? 0}
+          onChange={(timeout_seconds) => set({ timeout_seconds })}
+        />
+        <NumberField
+          id="exit-concurrency"
+          label="Concurrency"
+          min={1}
+          placeholder="4"
+          value={draft.concurrency ?? 0}
+          onChange={(concurrency) => set({ concurrency })}
+        />
       </div>
       <StringList
         id="exit-sites"
-        label="Check sites (plain-text IP echoers; empty = built-in defaults)"
+        label="Check sites"
+        hint="Plain-text IP echoers; empty uses the built-in defaults."
         values={draft.sites ?? []}
         placeholder="https://ifconfig.me"
         onChange={(sites) => set({ sites })}
       />
-      {saveError !== null && <div className="error-box">{saveError}</div>}
-      {saved && <div className="hint">Saved.</div>}
-      <button className="primary" onClick={save} disabled={saving}>
-        {saving ? "Saving…" : "Save schedule"}
-      </button>
+      {saveError !== null && (
+        <Notice onDismiss={() => setSaveError(null)}>{saveError}</Notice>
+      )}
+      <div className="toolbar" style={{ marginBottom: 0 }}>
+        <button
+          type="button"
+          className="primary"
+          onClick={() => void save()}
+          disabled={saving}
+        >
+          {saving ? "Saving…" : "Save schedule"}
+        </button>
+        <button
+          type="button"
+          onClick={() => setDraft({ ...(engine.data?.exit_checks ?? {}) })}
+        >
+          Reset
+        </button>
+      </div>
     </div>
   );
 }

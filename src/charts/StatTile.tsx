@@ -4,23 +4,27 @@
 export interface StatTileProps {
   label: string;
   value: string;
-  /** signed delta vs a named period, e.g. "+12% vs last hour" */
-  delta?: string;
-  /** direction × whether up is good; colors the delta */
-  deltaGood?: boolean;
-  /** optional 12-point sparkline */
-  spark?: number[];
+  /** signed delta vs a named period, e.g. "+12% vs previous hour" */
+  delta?: string | undefined;
+  /** how the delta reads: good/bad color it, neutral keeps it in ink */
+  deltaTone?: "good" | "bad" | "neutral" | undefined;
+  /** optional sparkline of the period's buckets */
+  spark?: number[] | undefined;
 }
 
-export function StatTile({ label, value, delta, deltaGood, spark }: StatTileProps) {
+export function StatTile({
+  label,
+  value,
+  delta,
+  deltaTone = "neutral",
+  spark,
+}: StatTileProps) {
   return (
     <div className="stat-tile">
       <div className="stat-label">{label}</div>
       <div className="stat-value">{value}</div>
       {delta !== undefined && (
-        <div className={deltaGood ? "stat-delta good" : "stat-delta bad"}>
-          {delta}
-        </div>
+        <div className={`stat-delta ${deltaTone}`}>{delta}</div>
       )}
       {spark !== undefined && spark.length > 1 && <Sparkline points={spark} />}
     </div>

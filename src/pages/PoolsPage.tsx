@@ -1,8 +1,15 @@
 // src/pages/PoolsPage.tsx — CRUD over pools (outbound set + filters + selector).
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useSdk } from "../sdk";
-import { errMessage, useAsync } from "../useAsync";
+import { useResource } from "../useResource";
+import { collect, required } from "../validate";
+import { PageHeader } from "../components/PageHeader";
+import { DataTable, EmptyState, type Column } from "../components/DataTable";
+import { FormCard } from "../components/FormCard";
+import { ConfirmButton } from "../components/ConfirmButton";
+import { SearchInput, matches } from "../components/SearchInput";
+import { SelectField, TextField, FieldGroup } from "../components/fields";
 import { StringList } from "../components/StringList";
 import { KvEditor } from "../components/KvEditor";
 import type { Pool, FilterSpec } from "./poolTypes";
@@ -11,122 +18,149 @@ const SELECTORS = ["random", "roundrobin", "sticky", "leastlatency"] as const;
 const FILTERS = ["location", "latency", "protocol"] as const;
 
 export function PoolsPage() {
-  return (
-    <>
-      <h1 className="page-title">Pools</h1>
-      <p className="page-sub">
-        Ordered outbound sets with filters and a selection strategy.
-      </p>
-      <PoolsCard />
-    </>
-  );
-}
-
-function PoolsCard() {
   const { goose } = useSdk();
-  const { data, error, loading, reload } = useAsync(() => goose.listPools(), [goose]);
-  const [draft, setDraft] = useState<Pool | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
+  const [filter, setFilter] = useState("");
 
-  if (loading && data === undefined)
-    return <div className="loading">Loading…</div>;
-  if (error !== null)
-    return <div className="error-box">Failed to load pools: {error}</div>;
-
-  const startCreate = () =>
-    setDraft({
+  const r = useResource<Pool>({
+    api: {
+      list: () => goose.listPools(),
+      save: (d) => goose.createPool(d),
+      remove: (id) => goose.deletePool(id),
+    },
+    deps: [goose],
+    idOf: (p) => p.id ?? "",
+    blank: () => ({
       id: "",
       outbound_ids: [],
       filters: [],
       selector: { type: "random", params: {} },
-    });
-  const startEdit = (p: Pool) => setDraft(normalize(p));
+    }),
+    normalize,
+    noun: "pool",
+    validate: (d) => collect({ id: required(d.id, "An ID is required") }),
+  });
 
-  const save = async () => {
-    if (draft === null) return;
-    setSaving(true);
-    setSaveError(null);
-    try {
-      await goose.createPool(draft);
-      setDraft(null);
-      reload();
-    } catch (err) {
-      setSaveError(errMessage(err));
-    } finally {
-      setSaving(false);
-    }
-  };
+  const items = useMemo(
+    () =>
+      r.items.filter((p) =>
+        matches(
+          `${p.id ?? ""} ${p.selector?.type ?? ""} ${(p.outbound_ids ?? []).join(" ")}`,
+          filter,
+        ),
+      ),
+    [r.items, filter],
+  );
 
-  const del = async (id: string) => {
-    try {
-      await goose.deletePool(id);
-      reload();
-    } catch (err) {
-      setSaveError(errMessage(err));
-    }
-  };
-
-  const items = data ?? [];
+  const columns: Array<Column<Pool>> = [
+    { key: "id", header: "ID", className: "mono", render: (p) => p.id },
+    {
+      key: "outbounds",
+      header: "Outbounds",
+      className: "mono",
+      render: (p) => {
+        const ids = p.outbound_ids ?? [];
+        const shown = ids.slice(0, 3).join(", ");
+        return ids.length === 0 ? (
+          "—"
+        ) : (
+          <span title={ids.join(", ")}>
+            {shown}
+            {ids.length > 3 ? ` +${ids.length - 3}` : ""}
+          </span>
+        );
+      },
+    },
+    {
+      key: "selector",
+      header: "Selector",
+      render: (p) => <span className="pill">{p.selector?.type ?? "—"}</span>,
+    },
+    {
+      key: "filters",
+      header: "Filters",
+      render: (p) =>
+        (p.filters ?? []).length === 0
+          ? "—"
+          : (p.filters ?? []).map((f) => f.type).join(", "),
+    },
+    {
+      key: "actions",
+      header: <span className="sr-only">Actions</span>,
+      className: "actions",
+      render: (p) => (
+        <>
+          <button type="button" className="ghost" onClick={() => r.startEdit(p)}>
+            Edit
+          </button>{" "}
+          <ConfirmButton onConfirm={() => void r.remove(p)} title={`Delete ${p.id ?? ""}`} />
+        </>
+      ),
+    },
+  ];
 
   return (
     <>
-      {saveError !== null && <div className="error-box">{saveError}</div>}
-      <div className="toolbar">
-        <button className="primary" onClick={startCreate}>
-          New pool
-        </button>
-      </div>
+      <PageHeader
+        title="Pools"
+        sub="Ordered outbound sets with filters and a selection strategy."
+        actions={
+          <button type="button" className="primary" onClick={r.startCreate}>
+            New pool
+          </button>
+        }
+      />
 
-      {draft !== null && (
-        <div className="card">
-          <h2>{draft.id === "" ? "New pool" : `Edit ${draft.id}`}</h2>
-          <PoolForm draft={draft} setDraft={setDraft} />
-          <div className="toolbar">
-            <button className="primary" onClick={() => void save()} disabled={saving}>
-              {saving ? "Saving…" : "Save"}
-            </button>
-            <button onClick={() => setDraft(null)}>Cancel</button>
-          </div>
-        </div>
+      {r.draft !== null && (
+        <FormCard
+          title={r.isNew ? "New pool" : `Edit ${r.idOf(r.draft)}`}
+          onSave={() => void r.save()}
+          onCancel={r.cancel}
+          saving={r.saving}
+          dirty
+          error={r.saveError}
+          onDismissError={r.dismissSaveError}
+        >
+          <PoolForm draft={r.draft} setDraft={r.setDraft} fieldErrors={r.fieldErrors} idLocked={!r.isNew} />
+        </FormCard>
       )}
 
+      <div className="filter-bar">
+        <SearchInput
+          id="pool-filter"
+          value={filter}
+          onChange={setFilter}
+          placeholder="Filter by id, selector, outbound…"
+        />
+        <span className="hint" style={{ margin: 0, alignSelf: "center" }}>
+          {items.length} of {r.items.length}
+        </span>
+      </div>
+
       <div className="card">
-        {items.length === 0 ? (
-          <div className="empty">No pools configured.</div>
-        ) : (
-          <div className="table-wrap">
-            <table className="data">
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>Outbounds</th>
-                  <th>Selector</th>
-                  <th>Filters</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.map((p) => (
-                  <tr key={p.id}>
-                    <td className="mono">{p.id}</td>
-                    <td>{(p.outbound_ids ?? []).length}</td>
-                    <td>
-                      <span className="pill">{p.selector?.type ?? "—"}</span>
-                    </td>
-                    <td>{(p.filters ?? []).map((f) => f.type).join(", ") || "—"}</td>
-                    <td>
-                      <button onClick={() => startEdit(p)}>Edit</button>{" "}
-                      <button className="danger" onClick={() => void del(p.id ?? "")}>
-                        Delete
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+        <DataTable
+          caption="Pools"
+          columns={columns}
+          rows={items}
+          rowKey={(p) => p.id ?? ""}
+          loading={r.loading}
+          error={r.error}
+          onRetry={r.reload}
+          empty={
+            r.items.length === 0 ? (
+              <EmptyState
+                title="No pools configured"
+                hint="A pool groups outbounds behind one selection strategy."
+                action={
+                  <button type="button" className="primary" onClick={r.startCreate}>
+                    New pool
+                  </button>
+                }
+              />
+            ) : (
+              <EmptyState title="No pools match" hint={`Nothing matches “${filter}”.`} />
+            )
+          }
+        />
       </div>
     </>
   );
@@ -135,9 +169,13 @@ function PoolsCard() {
 function PoolForm({
   draft,
   setDraft,
+  fieldErrors,
+  idLocked,
 }: {
   draft: Pool;
   setDraft: (p: Pool) => void;
+  fieldErrors: Record<string, string>;
+  idLocked: boolean;
 }) {
   const set = (patch: Partial<Pool>) => setDraft({ ...draft, ...patch });
   const filters = draft.filters ?? [];
@@ -151,39 +189,34 @@ function PoolForm({
   return (
     <>
       <div className="row">
-        <div className="field">
-          <label htmlFor="pool-id">ID</label>
-          <input
-            id="pool-id"
-            type="text"
-            value={draft.id ?? ""}
-            onChange={(e) => set({ id: e.target.value })}
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="pool-selector">Selection strategy</label>
-          <select
-            id="pool-selector"
-            value={draft.selector?.type ?? "random"}
-            onChange={(e) =>
-              set({
-                selector: { ...(draft.selector ?? {}), type: e.target.value },
-              })
-            }
-          >
-            {SELECTORS.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
-        </div>
+        <TextField
+          id="pool-id"
+          label="ID"
+          mono
+          value={draft.id ?? ""}
+          error={fieldErrors.id}
+          disabled={idLocked}
+          onChange={(id) => set({ id })}
+          placeholder="pool-relay"
+          autoFocus={!idLocked}
+        />
+        <SelectField
+          id="pool-selector"
+          label="Selection strategy"
+          value={draft.selector?.type ?? "random"}
+          options={[...SELECTORS]}
+          onChange={(type) =>
+            set({ selector: { ...(draft.selector ?? {}), type } })
+          }
+        />
       </div>
 
       <StringList
         id="pool-outbounds"
         label="Outbound ids (in order)"
         placeholder="outbound id"
+        mono
+        ordered
         values={draft.outbound_ids ?? []}
         onChange={(outbound_ids) => set({ outbound_ids })}
       />
@@ -193,50 +226,34 @@ function PoolForm({
         label="Selector params (JSON)"
         value={draft.selector?.params}
         onChange={(params) =>
-          set({
-            selector: { ...(draft.selector ?? { type: "random" }), params },
-          })
+          set({ selector: { ...(draft.selector ?? { type: "random" }), params } })
         }
       />
 
-      <div className="field">
-        <label>Filters</label>
+      <FieldGroup id="pool-filters" label="Filters" hint="Applied in order; a member must pass all of them.">
         <div className="arr-editor">
           {filters.map((f, i) => (
-            <div className="filter-row" key={i} style={{ marginBottom: 10 }}>
-              <div className="row">
-                <div className="field">
-                  <label htmlFor={`filter-type-${i}`}>Type</label>
-                  <select
-                    id={`filter-type-${i}`}
-                    value={f.type ?? "location"}
-                    onChange={(e) => setFilter(i, { type: e.target.value })}
-                  >
-                    {FILTERS.map((t) => (
-                      <option key={t} value={t}>
-                        {t}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div className="field" style={{ flex: 2 }}>
-                  <KvEditor
-                    id={`filter-params-${i}`}
-                    label="Params (JSON)"
-                    value={f.params}
-                    onChange={(params) => setFilter(i, { params })}
-                  />
-                </div>
-                <button
-                  type="button"
-                  className="danger"
-                  onClick={() =>
-                    set({ filters: filters.filter((_, j) => j !== i) })
-                  }
-                >
-                  Remove
-                </button>
-              </div>
+            <div className="item-row" key={i} style={{ alignItems: "start" }}>
+              <SelectField
+                id={`filter-type-${i}`}
+                label="Type"
+                value={f.type ?? "location"}
+                options={[...FILTERS]}
+                onChange={(type) => setFilter(i, { type })}
+              />
+              <KvEditor
+                id={`filter-params-${i}`}
+                label="Params (JSON)"
+                value={f.params}
+                onChange={(params) => setFilter(i, { params })}
+              />
+              <button
+                type="button"
+                className="danger"
+                onClick={() => set({ filters: filters.filter((_, j) => j !== i) })}
+              >
+                Remove
+              </button>
             </div>
           ))}
           <button
@@ -246,7 +263,7 @@ function PoolForm({
             Add filter
           </button>
         </div>
-      </div>
+      </FieldGroup>
     </>
   );
 }

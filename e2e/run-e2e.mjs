@@ -10,6 +10,7 @@ import { chromium } from "playwright-core";
 import assert from "node:assert/strict";
 
 const BASE = process.env.E2E_BASE_URL ?? "http://127.0.0.1:4173";
+const CHROME_PATH = process.env.CHROME_PATH;
 
 let failures = 0;
 async function test(name, fn) {
@@ -23,7 +24,9 @@ async function test(name, fn) {
   }
 }
 
-const browser = await chromium.launch();
+const browser = await chromium.launch(
+  CHROME_PATH ? { executablePath: CHROME_PATH } : {},
+);
 const page = await browser.newPage();
 page.setDefaultTimeout(10_000);
 
@@ -35,12 +38,63 @@ async function api(path) {
   return res.json();
 }
 
+// Helper: deletes are two-step (click arms, click again confirms), so a
+// single click must never remove anything.
+async function confirmDelete(rowSelector) {
+  const btn = page.locator(`${rowSelector} button.danger`).first();
+  await btn.click();
+  // Still there: the first click only arms the button.
+  await page.waitForSelector(`${rowSelector} button.danger.armed`, { timeout: 5_000 });
+  assert.ok(
+    (await page.locator(rowSelector).count()) > 0,
+    "first click deleted without confirming",
+  );
+  await page.locator(`${rowSelector} button.danger.armed`).first().click();
+  await page.waitForSelector(rowSelector, { state: "detached", timeout: 5_000 });
+}
+
 await test("app loads and connects to the engine", async () => {
   await page.goto(BASE, { waitUntil: "networkidle" });
   // The connection banner must report a working same-origin connection.
   await page.waitForSelector(".conn-banner .conn-dot.ok", { timeout: 5_000 });
   const msg = await page.locator(".conn-msg").innerText();
   assert.match(msg, /connected/, `connection banner says: ${msg}`);
+});
+
+await test("every route renders its page", async () => {
+  const routes = [
+    ["/", "Overview"],
+    ["/inbounds", "Inbounds"],
+    ["/outbounds", "Outbounds"],
+    ["/pools", "Pools"],
+    ["/chains", "Chains"],
+    ["/providers", "Providers"],
+    ["/exit-checks", "Exit IP"],
+    ["/metrics", "Metrics"],
+  ];
+  for (const [path, title] of routes) {
+    await page.goto(`${BASE}${path}`, { waitUntil: "networkidle" });
+    const h1 = await page.locator("main h1").innerText();
+    assert.equal(h1.trim(), title, `${path} heading`);
+  }
+});
+
+await test("unknown route shows a not-found page", async () => {
+  await page.goto(`${BASE}/nope`, { waitUntil: "networkidle" });
+  const bodyText = await page.locator("main").innerText();
+  assert.match(bodyText, /not found|No page/i, `404 body: ${bodyText}`);
+});
+
+await test("theme toggle switches to dark and back", async () => {
+  await page.goto(BASE, { waitUntil: "networkidle" });
+  await page.locator('button[aria-label="Dark theme"]').click();
+  await page.waitForSelector('html[data-theme="dark"]');
+  assert.equal(
+    await page.locator('button[aria-label="Dark theme"]').getAttribute("aria-pressed"),
+    "true",
+  );
+  await page.locator('button[aria-label="Light theme"]').click();
+  await page.waitForSelector('html[data-theme="light"]');
 });
 
 await test("inbound from config is listed", async () => {
@@ -53,6 +107,30 @@ await test("inbound from config is listed", async () => {
       `inbound ${inbound.id} not visible on /inbounds`,
     );
   }
+});
+
+await test("the form rejects a bad listen address before saving", async () => {
+  await page.goto(`${BASE}/inbounds`, { waitUntil: "networkidle" });
+  const id = `e2e-bad-${Date.now()}`;
+  await page.click("button:has-text('New inbound')");
+  await page.locator("#inb-id").fill(id);
+  await page.locator("#inb-listen").fill("not-a-host");
+  await page.click("button:has-text('Save')");
+  await page.waitForSelector("#inb-listen-error", { timeout: 5_000 });
+  assert.equal(
+    await page.locator("#inb-id").getAttribute("aria-invalid"),
+    null,
+    "unrelated field marked invalid",
+  );
+  const after = await api("inbounds");
+  assert.ok(
+    !after.some((i) => i.id === id),
+    "invalid inbound reached the engine",
+  );
+  // Cancel out of the form (twice: the dirty guard asks first).
+  await page.click("form button:has-text('Cancel')");
+  await page.click("form button:has-text('Discard changes?')");
+  await page.waitForSelector("#inb-id", { state: "detached", timeout: 5_000 });
 });
 
 await test("create + delete an inbound through the UI", async () => {
@@ -69,17 +147,27 @@ await test("create + delete an inbound through the UI", async () => {
     "created inbound missing from engine",
   );
 
-  // Delete it again through the row's delete control.
-  await page.locator(`tr:has-text('${id}') button.danger`).click();
-  await page.waitForSelector(`tr:has-text('${id}')`, {
-    state: "detached",
-    timeout: 5_000,
-  });
+  // Delete it again through the row's two-step delete control.
+  await confirmDelete(`tr:has-text('${id}')`);
   const final = await api("inbounds");
   assert.ok(
     !final.some((i) => i.id === id),
     "deleted inbound still present on engine",
   );
+});
+
+await test("table filter narrows the list client-side", async () => {
+  await page.goto(`${BASE}/inbounds`, { waitUntil: "networkidle" });
+  const inbounds = await api("inbounds");
+  if (inbounds.length === 0) return; // nothing to filter on a fresh engine
+  const id = inbounds[0].id;
+  await page.locator("#inbound-filter").fill(id);
+  const rows = page.locator("table.data tbody tr");
+  const shown = await rows.count();
+  assert.equal(shown, 1, `filter left ${shown} rows`);
+  await page.locator("#inbound-filter").fill("zzz-no-such-inbound");
+  await page.waitForSelector(".empty", { timeout: 5_000 });
+  await page.locator("#inbound-filter").fill("");
 });
 
 await test("engine config form is live on the overview", async () => {
@@ -106,12 +194,8 @@ await test("create + delete a subscription provider through the UI", async () =>
     "created provider missing from engine",
   );
 
-  // Delete it again through the row's delete control.
-  await page.locator(`tr:has-text('${id}') button.danger`).click();
-  await page.waitForSelector(`tr:has-text('${id}')`, {
-    state: "detached",
-    timeout: 5_000,
-  });
+  // Delete it again through the row's two-step delete control.
+  await confirmDelete(`tr:has-text('${id}')`);
   const final = await api("providers");
   assert.ok(
     !final.some((p) => p.id === id),
@@ -134,13 +218,23 @@ await test("metrics page renders the dashboard", async () => {
   assert.match(bodyText, /Metrics/, "metrics heading missing");
   assert.match(
     bodyText,
-    /Requests in range|Success rate|Avg latency/,
+    /Requests in range|Success rate|Avg latency/i,
     "KPI tiles missing",
   );
   // At least one metric row or an explicit empty state must be present.
   assert.ok(
-    /ok|failed|No metrics/.test(bodyText),
+    /ok|failed|No metrics|No requests/.test(bodyText),
     "no metric rows and no empty state",
+  );
+});
+
+await test("exit IP page renders checks or its empty state", async () => {
+  await page.goto(`${BASE}/exit-checks`, { waitUntil: "networkidle" });
+  const bodyText = await page.locator("main").innerText();
+  assert.match(bodyText, /Exit IP/, "exit IP heading missing");
+  assert.ok(
+    /Current exit IP per outbound|No exit-IP checks recorded yet/.test(bodyText),
+    `neither table nor empty state: ${bodyText.slice(0, 200)}`,
   );
 });
 
