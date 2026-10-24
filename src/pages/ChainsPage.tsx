@@ -5,6 +5,7 @@ import { useSdk } from "../sdk";
 import { errMessage, useAsync } from "../useAsync";
 import { StringList } from "../components/StringList";
 import type { ChainSpec } from "@goose-network/goose-sdk";
+import { ChainProbesCard } from "./ChainProbesCard";
 
 export function ChainsPage() {
   return (
@@ -14,6 +15,7 @@ export function ChainsPage() {
         Ordered pool layers; a request traverses them in order.
       </p>
       <ChainsCard />
+      <ChainProbesCard />
     </>
   );
 }

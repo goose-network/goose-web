@@ -9,6 +9,7 @@ import { PoolsPage } from "./pages/PoolsPage";
 import { ChainsPage } from "./pages/ChainsPage";
 import { ProvidersPage } from "./pages/ProvidersPage";
 import { MetricsPage } from "./pages/MetricsPage";
+import { ExitChecksPage } from "./pages/ExitChecksPage";
 
 export function App() {
   return (
@@ -24,6 +25,7 @@ export function App() {
           <NavLink to="/pools">Pools</NavLink>
           <NavLink to="/chains">Chains</NavLink>
           <NavLink to="/providers">Providers</NavLink>
+          <NavLink to="/exit-checks">Exit IP</NavLink>
           <NavLink to="/metrics">Metrics</NavLink>
         </nav>
       </aside>
@@ -36,6 +38,7 @@ export function App() {
           <Route path="/pools" element={<PoolsPage />} />
           <Route path="/chains" element={<ChainsPage />} />
           <Route path="/providers" element={<ProvidersPage />} />
+          <Route path="/exit-checks" element={<ExitChecksPage />} />
           <Route path="/metrics" element={<MetricsPage />} />
         </Routes>
       </main>
