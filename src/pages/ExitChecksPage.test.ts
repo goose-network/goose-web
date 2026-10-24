@@ -8,8 +8,9 @@ import { latestPerOutbound, outboundIDs } from "./ExitChecksPage";
 // latency arrives on the wire as a nanosecond count, but the generated schema
 // type models time.Duration as an enum — tests build checks with a plain
 // number and widen, the same workaround MetricsPage uses.
-type CheckInput = Partial<Omit<ExitCheck, "latency">> & {
+type CheckInput = Partial<Omit<ExitCheck, "latency" | "outboundID">> & {
   latency?: number;
+  outboundID?: string | undefined;
 };
 
 function check(over: CheckInput): ExitCheck {
