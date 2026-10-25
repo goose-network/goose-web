@@ -1,7 +1,7 @@
 // src/pages/EnginePage.tsx — overview: what the engine is running right now,
 // what's configured, and the engine-level config editor.
 
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useSdk } from "../sdk";
 import { errMessage, useAsync } from "../useAsync";
@@ -23,6 +23,20 @@ export function EnginePage() {
       <EngineCard />
     </>
   );
+}
+
+/** File paths wrap at segment boundaries (after a slash), never mid-name. */
+function breakable(value: string) {
+  return value.split("/").map((seg, i) => (
+    <Fragment key={i}>
+      {i > 0 && (
+        <>
+          /<wbr />
+        </>
+      )}
+      {seg}
+    </Fragment>
+  ));
 }
 
 /** Read-only facts about the live engine, straight from GET /api/engine. */
@@ -76,12 +90,14 @@ function EngineStatusCard() {
           </div>
           <div>
             <dt>Metrics database</dt>
-            <dd className="mono">{data.db || "—"}</dd>
+            <dd className="mono">{breakable(data.db || "—")}</dd>
           </div>
           <div>
             <dt>Geo database</dt>
             <dd className="mono">
-              {data.geo?.type ? `${data.geo.type} ${data.geo.path ?? ""}` : "disabled"}
+              {data.geo?.type
+                ? breakable(`${data.geo.type} ${data.geo.path ?? ""}`)
+                : "disabled"}
             </dd>
           </div>
           <div>
