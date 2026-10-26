@@ -924,7 +924,9 @@ button:disabled {
 /* users editor (inbound form) */
 .user-row {
   display: grid;
-  grid-template-columns: minmax(110px, 1fr) minmax(110px, 1fr) minmax(110px, 1.2fr) minmax(110px, 1.2fr) 26px;
+  grid-template-columns:
+    minmax(110px, 1fr) minmax(110px, 1fr) minmax(110px, 1.2fr)
+    minmax(110px, 1.2fr) minmax(110px, 1.2fr) 26px;
   gap: 8px;
   align-items: center;
   margin-bottom: 6px;
@@ -935,19 +937,13 @@ button:disabled {
   min-width: 0;
 }
 
-.user-head {
-  display: grid;
-  grid-template-columns: minmax(110px, 1fr) minmax(110px, 1fr) minmax(110px, 1.2fr) minmax(110px, 1.2fr) 26px;
-  gap: 8px;
-  margin-bottom: 4px;
-}
-
-.user-head span {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--text-muted);
+/* per-user filters: a second line inside the user row, spanning the grid */
+.user-filters {
+  grid-column: 1 / -1;
+  padding: 8px 10px;
+  border-left: 2px solid var(--border);
+  background: var(--surface-sunken);
+  border-radius: 4px;
 }
 
 /* --- overview: fact grid + count tiles --- */

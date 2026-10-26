@@ -165,8 +165,11 @@ export function InboundsPage() {
   );
 }
 
-function routingLabel(policy: Policy | undefined): string {
+// The routing label mirrors the engine's resolution order (chain, then
+// outbound, then pool) so the table's Routing column stays honest.
+export function routingLabel(policy: Policy | undefined): string {
   if (policy?.chain_id) return `chain ${policy.chain_id}`;
+  if (policy?.outbound_id) return `outbound ${policy.outbound_id}`;
   if (policy?.pool_id) return `pool ${policy.pool_id}`;
   return "any";
 }
@@ -190,17 +193,13 @@ function InboundForm({
   const setPolicy = (patch: Partial<Policy>) =>
     set({ policy: { ...policy, ...patch } });
 
-  const setFilter = (i: number, patch: Partial<FilterSpec>) => {
-    const next = [...filters];
-    next[i] = { ...next[i]!, ...patch };
-    setPolicy({ filters: next });
-  };
-
   const setUser = (i: number, patch: Partial<User>) => {
     const next = [...users];
     next[i] = { ...next[i]!, ...patch };
     set({ users: next });
   };
+  const setUserPolicy = (i: number, patch: Partial<Policy>) =>
+    setUser(i, { policy: { ...(users[i]!.policy ?? {}), ...patch } });
 
   return (
     <>
@@ -244,6 +243,15 @@ function InboundForm({
           onChange={(chain_id) => setPolicy({ chain_id })}
         />
         <TextField
+          id="inb-outbound"
+          label="Outbound"
+          mono
+          value={policy.outbound_id ?? ""}
+          placeholder="outbound id (optional)"
+          hint="Pin this inbound to one server — used when no chain is set."
+          onChange={(outbound_id) => setPolicy({ outbound_id })}
+        />
+        <TextField
           id="inb-pool"
           label="Pool"
           mono
@@ -256,60 +264,20 @@ function InboundForm({
       <FieldGroup
         id="inb-filters"
         label="Policy filters"
-        hint="Narrow the pool for this inbound; ignored when a chain routes the request."
+        hint="Narrow the route for this inbound (on top of a pool's own filters, and on every layer of a chain)."
       >
-        <div className="arr-editor">
-          {filters.map((f, i) => (
-            <div className="item-row" key={i} style={{ alignItems: "start" }}>
-              <SelectField
-                id={`inb-filter-type-${i}`}
-                label="Type"
-                className="filter-type"
-                value={f.type ?? "location"}
-                options={[...FILTERS]}
-                onChange={(type) => setFilter(i, { type })}
-              />
-              <KvEditor
-                id={`inb-filter-params-${i}`}
-                label="Params (JSON)"
-                value={f.params}
-                onChange={(params) => setFilter(i, { params })}
-              />
-              <button
-                type="button"
-                className="danger"
-                onClick={() =>
-                  setPolicy({ filters: filters.filter((_, j) => j !== i) })
-                }
-              >
-                Remove
-              </button>
-            </div>
-          ))}
-          <button
-            type="button"
-            onClick={() =>
-              setPolicy({ filters: [...filters, { type: "location", params: {} }] })
-            }
-          >
-            Add policy filter
-          </button>
-        </div>
+        <FilterList
+          id="inb-filter"
+          filters={filters}
+          onChange={(next) => setPolicy({ filters: next })}
+        />
       </FieldGroup>
 
       <FieldGroup
         id="inb-users"
         label="Users"
-        hint="Leave empty for no authentication."
+        hint="Leave empty for no authentication. A user's route fields (chain / outbound / pool) replace the inbound's as a group; their filters are their own."
       >
-        {users.length > 0 && (
-          <div className="user-head" aria-hidden="true">
-            <span>Username</span>
-            <span>Password</span>
-            <span>Chain (optional)</span>
-            <span>Pool (optional)</span>
-          </div>
-        )}
         {users.map((u, i) => (
           <div className="user-row" key={i}>
             <input
@@ -333,11 +301,15 @@ function InboundForm({
               aria-label={`Per-user chain for ${u.username || `user ${i + 1}`}`}
               placeholder="per-user chain"
               value={u.policy?.chain_id ?? ""}
-              onChange={(e) =>
-                setUser(i, {
-                  policy: { ...(u.policy ?? {}), chain_id: e.target.value },
-                })
-              }
+              onChange={(e) => setUserPolicy(i, { chain_id: e.target.value })}
+            />
+            <input
+              type="text"
+              className="mono"
+              aria-label={`Per-user outbound for ${u.username || `user ${i + 1}`}`}
+              placeholder="per-user outbound"
+              value={u.policy?.outbound_id ?? ""}
+              onChange={(e) => setUserPolicy(i, { outbound_id: e.target.value })}
             />
             <input
               type="text"
@@ -345,11 +317,7 @@ function InboundForm({
               aria-label={`Per-user pool for ${u.username || `user ${i + 1}`}`}
               placeholder="per-user pool"
               value={u.policy?.pool_id ?? ""}
-              onChange={(e) =>
-                setUser(i, {
-                  policy: { ...(u.policy ?? {}), pool_id: e.target.value },
-                })
-              }
+              onChange={(e) => setUserPolicy(i, { pool_id: e.target.value })}
             />
             <button
               type="button"
@@ -359,6 +327,13 @@ function InboundForm({
             >
               ×
             </button>
+            <div className="user-filters">
+              <FilterList
+                id={`inb-user-filter-${i}`}
+                filters={u.policy?.filters ?? []}
+                onChange={(next) => setUserPolicy(i, { filters: next })}
+              />
+            </div>
           </div>
         ))}
         <button
@@ -378,7 +353,13 @@ function normalize(inb: Inbound): Inbound {
     users: (inb.users ?? []).map((u) => ({
       username: u.username ?? "",
       password: u.password ?? "",
-      policy: u.policy ?? {},
+      policy: {
+        ...(u.policy ?? {}),
+        filters: (u.policy?.filters ?? []).map((f) => ({
+          ...f,
+          params: f.params ?? {},
+        })),
+      },
     })),
     policy: {
       ...(inb.policy ?? {}),
@@ -388,4 +369,60 @@ function normalize(inb: Inbound): Inbound {
       })),
     },
   };
+}
+
+// FilterList edits a policy's filter array: the same shape serves the
+// inbound-level policy and each user's (filters are per-user now).
+function FilterList({
+  id,
+  filters,
+  onChange,
+}: {
+  id: string;
+  filters: FilterSpec[];
+  onChange: (next: FilterSpec[]) => void;
+}) {
+  return (
+    <div className="arr-editor">
+      {filters.map((f, i) => (
+        <div className="item-row" key={i} style={{ alignItems: "start" }}>
+          <SelectField
+            id={`${id}-type-${i}`}
+            label="Type"
+            className="filter-type"
+            value={f.type ?? "location"}
+            options={[...FILTERS]}
+            onChange={(type) => {
+              const next = [...filters];
+              next[i] = { ...next[i]!, type };
+              onChange(next);
+            }}
+          />
+          <KvEditor
+            id={`${id}-params-${i}`}
+            label="Params (JSON)"
+            value={f.params}
+            onChange={(params) => {
+              const next = [...filters];
+              next[i] = { ...next[i]!, params };
+              onChange(next);
+            }}
+          />
+          <button
+            type="button"
+            className="danger"
+            onClick={() => onChange(filters.filter((_, j) => j !== i))}
+          >
+            Remove
+          </button>
+        </div>
+      ))}
+      <button
+        type="button"
+        onClick={() => onChange([...filters, { type: "location", params: {} }])}
+      >
+        Add filter
+      </button>
+    </div>
+  );
 }

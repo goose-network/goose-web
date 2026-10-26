@@ -1,4 +1,4 @@
-// src/pages/ChainsPage.tsx — CRUD over chains (ordered pool layers).
+// src/pages/ChainsPage.tsx — CRUD over chains (ordered pool/server layers).
 
 import { useMemo, useState } from "react";
 import { useSdk } from "../sdk";
@@ -73,7 +73,7 @@ export function ChainsPage() {
     <>
       <PageHeader
         title="Chains"
-        sub="Ordered pool layers; a request traverses them in order."
+        sub="Ordered layers of pools and/or single outbound servers; a request traverses them in order."
         actions={
           <button type="button" className="primary" onClick={r.startCreate}>
             New chain
@@ -104,15 +104,16 @@ export function ChainsPage() {
           />
           <StringList
             id="chain-layers"
-            label="Pool layers (in order)"
-            placeholder="pool id"
+            label="Layers (in order)"
+            placeholder="pool or outbound id"
+            hint="Each layer is a pool id or a single outbound server's id; when an id matches both, the pool wins."
             mono
             ordered
             values={r.draft.layers ?? []}
             onChange={(layers) => r.setDraft({ ...r.draft!, layers })}
           />
           {r.fieldErrors.layers !== undefined && (
-            <Notice>Add at least one pool layer — an empty chain routes nothing.</Notice>
+            <Notice>Add at least one layer — an empty chain routes nothing.</Notice>
           )}
         </FormCard>
       )}
@@ -142,7 +143,7 @@ export function ChainsPage() {
             r.items.length === 0 ? (
               <EmptyState
                 title="No chains configured"
-                hint="Chains stack pools into multi-hop routes."
+                hint="Chains stack pools and servers into multi-hop routes."
                 action={
                   <button type="button" className="primary" onClick={r.startCreate}>
                     New chain
