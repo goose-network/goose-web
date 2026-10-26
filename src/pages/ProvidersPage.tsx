@@ -6,7 +6,7 @@
 import { useMemo, useState } from "react";
 import { useSdk } from "../sdk";
 import { useResource } from "../useResource";
-import { collect, httpUrl, required } from "../validate";
+import { collect, httpUrl, required, upstreamRoute } from "../validate";
 import { PageHeader } from "../components/PageHeader";
 import { DataTable, EmptyState, type Column } from "../components/DataTable";
 import { FormCard } from "../components/FormCard";
@@ -37,6 +37,7 @@ export function ProvidersPage() {
       provider: "subscription",
       pool_ids: [],
       config: { url: "" },
+      upstream_proxy: "",
     }),
     normalize: (p) => ({ ...p, pool_ids: p.pool_ids ?? [], config: { ...(p.config ?? {}) } }),
     noun: "provider",
@@ -50,6 +51,10 @@ export function ProvidersPage() {
                 "This plugin needs an http(s) subscription URL",
               )
             : null,
+        upstream: upstreamRoute(
+          d.upstream_proxy,
+          "Route is empty, “direct”, “access”, “outbound:<id>”, “pool:<id>”, or a bare pool/outbound id",
+        ),
       }),
   });
 
@@ -57,7 +62,7 @@ export function ProvidersPage() {
     () =>
       r.items.filter((p) =>
         matches(
-          `${p.id ?? ""} ${p.provider ?? ""} ${(p.pool_ids ?? []).join(" ")} ${urlOf(p)}`,
+          `${p.id ?? ""} ${p.provider ?? ""} ${(p.pool_ids ?? []).join(" ")} ${urlOf(p)} ${p.upstream_proxy ?? ""}`,
           filter,
         ),
       ),
@@ -252,6 +257,18 @@ function ProviderForm({
           placeholder={EXAMPLES[plugin].urlPlaceholder}
           onChange={(url) => setCfg({ ...cfg, url })}
         />
+        <TextField
+          id="prov-upstream"
+          label="Upstream proxy"
+          mono
+          value={draft.upstream_proxy ?? ""}
+          error={fieldErrors.upstream}
+          placeholder="pool:relays (optional)"
+          onChange={(upstream_proxy) =>
+            set({ upstream_proxy: upstream_proxy.trim() })
+          }
+          hint="Routes this provider's own URL fetches through an engine route instead of the engine host's network — for subscription URLs the host cannot reach directly. One of: outbound:<id>, pool:<id>, a bare pool/outbound id, or “access” (dial direct first, then the access pool). Blank = direct."
+        />
       </div>
       <PluginHelp plugin={plugin} />
       <KvEditor
@@ -280,7 +297,7 @@ const EXAMPLES: Record<Plugin, PluginHelpInfo> = {
     title: "subscription — generic subscription link",
     paragraphs: [
       "Fetches a remote proxy list over HTTP and re-fetches it on refresh. The body may be Clash YAML (proxies:), a base64-encoded V2Ray link list (vmess://…), or a plain link list — the format is auto-detected.",
-      "The URL is required; every other field is optional. Outbound IDs are generated from the prefix and each proxy’s server:port.",
+      "The URL is required; every other field is optional. Outbound IDs are generated from the prefix and each proxy’s server:port. When the URL is unreachable from the engine host (e.g. behind a firewall), set Upstream proxy to fetch it through an engine outbound or pool.",
     ],
     example: {
       label: "Example: one subscription feeding two pools",

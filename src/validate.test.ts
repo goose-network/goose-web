@@ -2,7 +2,7 @@
 // the engine, so the boundary cases here are the ones the forms rely on.
 
 import { describe, expect, it } from "vitest";
-import { collect, hostPort, httpUrl, required } from "./validate";
+import { collect, hostPort, httpUrl, required, upstreamRoute } from "./validate";
 
 const MSG = "bad";
 
@@ -41,6 +41,30 @@ describe("httpUrl", () => {
     expect(httpUrl("ftp://example.com/", MSG)).toBe(MSG);
     expect(httpUrl("example.com/list.txt", MSG)).toBe(MSG);
     expect(httpUrl("", MSG)).toBe(MSG);
+  });
+});
+
+describe("upstreamRoute", () => {
+  it("is optional: empty and undefined pass", () => {
+    expect(upstreamRoute(undefined, MSG)).toBeNull();
+    expect(upstreamRoute("", MSG)).toBeNull();
+    expect(upstreamRoute("   ", MSG)).toBeNull();
+  });
+
+  it("accepts every route form", () => {
+    expect(upstreamRoute("direct", MSG)).toBeNull();
+    expect(upstreamRoute("access", MSG)).toBeNull();
+    expect(upstreamRoute("outbound:my-proxy", MSG)).toBeNull();
+    expect(upstreamRoute("pool:relays", MSG)).toBeNull();
+    // Bare ids resolve as a pool first, else an outbound.
+    expect(upstreamRoute("relays", MSG)).toBeNull();
+  });
+
+  it("rejects whitespace and a prefix with no id", () => {
+    expect(upstreamRoute("outbound: my-proxy", MSG)).toBe(MSG);
+    expect(upstreamRoute("my pool", MSG)).toBe(MSG);
+    expect(upstreamRoute("outbound:", MSG)).toBe(MSG);
+    expect(upstreamRoute("pool:", MSG)).toBe(MSG);
   });
 });
 

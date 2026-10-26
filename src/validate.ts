@@ -32,6 +32,25 @@ export function httpUrl(value: string | undefined, message: string): string | nu
   }
 }
 
+/**
+ * upstream_proxy route on a provider spec: empty (fetch direct, the default),
+ * "direct", "access", "outbound:<id>", "pool:<id>", or a bare pool/outbound
+ * id. Whitespace anywhere, or a prefix with no id after it, are the typos
+ * worth catching in the form; the engine resolves the rest.
+ */
+export function upstreamRoute(
+  value: string | undefined,
+  message: string,
+): string | null {
+  if (value === undefined || value.trim() === "") return null;
+  const v = value.trim();
+  if (/\s/.test(v)) return message;
+  for (const prefix of ["outbound:", "pool:"]) {
+    if (v.startsWith(prefix) && v.length === prefix.length) return message;
+  }
+  return null;
+}
+
 /** Merge field errors, dropping nulls; empty object means "valid". */
 export function collect(
   entries: Record<string, string | null>,
