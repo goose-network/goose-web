@@ -312,8 +312,9 @@ const EXAMPLES: Record<Plugin, PluginHelpInfo> = {
     urlPlaceholder: "(no config needed — leave blank)",
     title: "psiphon — Psiphon circumvention network",
     paragraphs: [
-      "Runs with zero configuration: leave every field empty and the provider connects to the production Psiphon network, auto-downloads the signed server list, and exposes one socks5 outbound that rides real Psiphon tunnels. The engine starts using it as soon as the tunnel establishes (typically seconds to a minute).",
-      "Only set fields to customize: config_path points at a real psiphon.config (for a custom Psiphon network), upstream_proxy routes tunnel-core through another proxy (e.g. socks5://127.0.0.1:7890) when direct 443 is blocked, establish_timeout_seconds (default 120) bounds how long to wait for the first tunnel, and data_dir relocates the server-list datastore.",
+      "Runs with zero configuration: leave every field empty and the provider connects to the production Psiphon network, auto-downloads the signed server list, and feeds one general “psiphon” outbound (any server) plus one outbound per real Psiphon server — IP, region, protocols — so the Outbounds page shows the actual server list and each server can be pooled, pinned, or filtered individually.",
+      "Dials run in memory through the engine's network stack: no local SOCKS or HTTP proxy is involved, and the tunnels' own connections to their Psiphon servers go through the engine's configured stack. The general outbound appears as soon as a tunnel establishes (typically seconds to a minute); per-server outbounds appear as soon as the server list lands.",
+      "Only set fields to customize: config_path points at a real psiphon.config (for a custom Psiphon network), server_list_path seeds the datastore from a server_list.dat, upstream_proxy routes tunnel-core through another proxy (e.g. socks5://127.0.0.1:7890) when direct 443 is blocked, establish_timeout_seconds (default 120) bounds how long a dial waits for a tunnel, and data_dir relocates the server-list datastore.",
     ],
     example: {
       label: "Example: out-of-the-box (empty config)",
