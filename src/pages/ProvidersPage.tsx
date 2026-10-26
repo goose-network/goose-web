@@ -15,6 +15,7 @@ import { SearchInput, matches } from "../components/SearchInput";
 import { SelectField, TextField } from "../components/fields";
 import { KvEditor } from "../components/KvEditor";
 import { StringList } from "../components/StringList";
+import { ProvidersStatusCard } from "./ProvidersStatusCard";
 import type { ProviderSpec } from "@goose-network/goose-sdk";
 
 const PLUGINS = ["subscription", "psiphon", "mihomo", "singbox"] as const;
@@ -119,6 +120,8 @@ export function ProvidersPage() {
           </button>
         }
       />
+
+      <ProvidersStatusCard />
 
       {r.draft !== null && (
         <FormCard
