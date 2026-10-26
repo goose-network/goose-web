@@ -184,14 +184,19 @@ await test("create + delete a subscription provider through the UI", async () =>
   const id = `e2e-sub-${Date.now()}`;
   await page.click("button:has-text('New provider')");
   await page.locator("#prov-id").fill(id);
-  await page.locator("#prov-pool").fill(`pool-${id}`);
+  // Pool IDs is a list editor: add one entry and fill it.
+  await page.click("button:has-text('Add pool')");
+  await page.locator("#prov-pools").fill(`pool-${id}`);
   await page.locator("#prov-url").fill("http://127.0.0.1:18080/example.com/");
   await page.click("button:has-text('Save')");
   await page.waitForSelector(`tr:has-text('${id}')`, { timeout: 5_000 });
   const after = await api("providers");
   assert.ok(
-    after.some((p) => p.id === id && p.pool_id === `pool-${id}`),
-    "created provider missing from engine",
+    after.some(
+      (p) => p.id === id && (p.pool_ids ?? []).includes(`pool-${id}`),
+      "created provider missing from engine",
+    ),
+    `created provider missing from engine: ${JSON.stringify(after)}`,
   );
 
   // Delete it again through the row's two-step delete control.
@@ -201,6 +206,29 @@ await test("create + delete a subscription provider through the UI", async () =>
     !final.some((p) => p.id === id),
     "deleted provider still present on engine",
   );
+});
+
+await test("provider form shows per-plugin examples while configuring", async () => {
+  await page.goto(`${BASE}/providers`, { waitUntil: "networkidle" });
+  await page.click("button:has-text('New provider')");
+  // Switching the plugin select must swap the inline guidance + example.
+  for (const [plugin, marker] of [
+    ["subscription", "generic subscription link"],
+    ["psiphon", "zero configuration"],
+    ["mihomo", "bundled mihomo core"],
+    ["singbox", "three subscription dialects"],
+  ]) {
+    await page.locator("#prov-plugin").selectOption(plugin);
+    const bodyText = await page.locator("main").innerText();
+    assert.match(
+      bodyText,
+      new RegExp(marker),
+      `plugin ${plugin} guidance missing (looked for ${marker})`,
+    );
+    assert.match(bodyText, /pool_ids/, `plugin ${plugin} example JSON missing pool_ids`);
+  }
+  // The form starts not-dirty, so the first Cancel click discards directly.
+  await page.click("button:has-text('Cancel')");
 });
 
 await test("metrics page renders the dashboard", async () => {
