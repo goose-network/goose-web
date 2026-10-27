@@ -69,36 +69,6 @@ function exitChecks() {
   return out;
 }
 
-function probes() {
-  const at = new Date(Date.now() - 4 * MIN).toISOString();
-  return [
-    {
-      outboundID: "relay-1",
-      poolID: "pool-relay",
-      address: "10.0.0.1:1080",
-      direct: { ok: true, at },
-      relay: { ok: true, at },
-      relayVia: "",
-    },
-    {
-      outboundID: "relay-2",
-      poolID: "pool-relay",
-      address: "10.0.0.2:1080",
-      direct: { ok: false, error: "dial tcp 10.0.0.2:1080: connect: no route to host", at },
-      relay: { ok: true, at },
-      relayVia: "relay-1",
-    },
-    {
-      outboundID: "relay-3",
-      poolID: "pool-relay",
-      address: "10.0.0.3:1080",
-      direct: { ok: false, error: "i/o timeout", at },
-      relay: { ok: false, error: "relay refused", at },
-      relayVia: "",
-    },
-  ];
-}
-
 /** Install the stubs on a Playwright page. */
 export async function stubObservability(page) {
   const json = (body) => ({
@@ -109,5 +79,4 @@ export async function stubObservability(page) {
   await page.route("**/api/metrics**", (r) => r.fulfill(json(metrics())));
   await page.route("**/api/exit-checks?**", (r) => r.fulfill(json(exitChecks())));
   await page.route("**/api/exit-checks", (r) => r.fulfill(json(exitChecks())));
-  await page.route("**/api/chains/probes", (r) => r.fulfill(json(probes())));
 }

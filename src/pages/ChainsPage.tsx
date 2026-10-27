@@ -13,7 +13,6 @@ import { SearchInput, matches } from "../components/SearchInput";
 import { TextField } from "../components/fields";
 import { StringList } from "../components/StringList";
 import type { ChainSpec } from "@goose-network/goose-sdk";
-import { ChainProbesCard } from "./ChainProbesCard";
 
 export function ChainsPage() {
   const { goose } = useSdk();
@@ -156,8 +155,6 @@ export function ChainsPage() {
           }
         />
       </div>
-
-      <ChainProbesCard />
     </>
   );
 }

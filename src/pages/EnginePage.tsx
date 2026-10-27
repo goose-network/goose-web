@@ -112,6 +112,18 @@ function EngineStatusCard() {
               )}
             </dd>
           </div>
+          <div>
+            <dt>Reachability probes</dt>
+            <dd>
+              {data.probes?.enabled === true ? (
+                <span className="pill ok">
+                  every {data.probes.interval_seconds || 300}s
+                </span>
+              ) : (
+                <span className="pill">off</span>
+              )}
+            </dd>
+          </div>
         </dl>
       )}
     </div>
