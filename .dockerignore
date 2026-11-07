@@ -1,0 +1,9 @@
+# Keep the build context small — the image pins deps with npm ci and
+# builds from src/, so nothing here is needed inside the context.
+.git
+node_modules
+dist
+*.tsbuildinfo
+coverage
+.vite
+e2e

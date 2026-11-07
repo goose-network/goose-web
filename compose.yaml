@@ -1,0 +1,56 @@
+# The whole goose stack in one command — the engine (api) plus this UI (web):
+#
+#   docker compose up --build
+#
+# then open http://localhost:8080 with an empty base-URL connection
+# (same origin): the web container's nginx proxies /api to the engine
+# service over the compose network.
+
+services:
+  # The goose engine — the admin API this UI drives. CI publishes the
+  # multi-arch image on every push to the engine's main (docker compose
+  # pull refreshes it; pin a sha-<rev> tag for reproducibility). Building
+  # it from source needs credentials for the private openrung-go
+  # dependency, so compose runs the published image.
+  api:
+    image: ghcr.io/goose-network/goose:latest
+    environment:
+      # Bind the admin API on all interfaces inside the container so the
+      # web container can reach it over the compose network. The binary's
+      # built-in default is the container's own loopback, which nothing
+      # outside the container's netns can talk to.
+      GOOSE_API_LISTEN: 0.0.0.0:9090
+    ports:
+      # Direct access to the admin API (curl, the SDK) without going
+      # through the UI. Loopback-only by default: anyone who can reach it
+      # can drive the engine, so widen the bind (GOOSE_API_BIND=0.0.0.0)
+      # only together with an API token in the engine config. Inbound
+      # proxy ports are config-driven — add mappings for them here as you
+      # create inbounds in the UI.
+      - "${GOOSE_API_BIND:-127.0.0.1}:${GOOSE_API_PORT:-9090}:9090"
+    volumes:
+      # /data holds the metrics bbolt DB and the persisted config
+      # (goose.json): every edit made through the UI is written back here
+      # and survives restarts.
+      - goose-data:/data
+
+  # This repo's image: the multi-stage build compiles the SPA and serves
+  # it with nginx, which reverse-proxies /api to the engine.
+  web:
+    build: .
+    environment:
+      # Compose service DNS name, resolved by nginx when it starts.
+      GOOSE_API_URL: http://api:9090
+    ports:
+      - "${GOOSE_WEB_PORT:-8080}:8080"
+    depends_on:
+      api:
+        condition: service_started
+        # nginx resolves `api` once at startup and caches it; if api is
+        # recreated (new engine image) its IP changes and the running
+        # proxy would hold a stale address. restart: true drags web along
+        # whenever api is recreated, so nginx re-resolves.
+        restart: true
+
+volumes:
+  goose-data:
