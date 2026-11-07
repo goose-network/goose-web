@@ -1,10 +1,11 @@
 # The whole goose stack in one command — the engine (api) plus this UI (web):
 #
-#   docker compose up --build
+#   docker compose up
 #
-# then open http://localhost:8080 with an empty base-URL connection
-# (same origin): the web container's nginx proxies /api to the engine
-# service over the compose network.
+# Both services run the images CI publishes to GHCR on every push to
+# main, so no local build is needed. Then open http://localhost:8080
+# with an empty base-URL connection (same origin): the web container's
+# nginx proxies /api to the engine service over the compose network.
 
 services:
   # The goose engine — the admin API this UI drives. CI publishes the
@@ -34,10 +35,12 @@ services:
       # and survives restarts.
       - goose-data:/data
 
-  # This repo's image: the multi-stage build compiles the SPA and serves
-  # it with nginx, which reverse-proxies /api to the engine.
+  # This repo's UI, as published by CI: nginx serves the built SPA and
+  # reverse-proxies /api to the engine. (The local Dockerfile builds the
+  # same image from source when needed — CI builds, smoke-tests, and
+  # pushes it on every push to main.)
   web:
-    build: .
+    image: ghcr.io/goose-network/goose-web:latest
     environment:
       # Compose service DNS name, resolved by nginx when it starts.
       GOOSE_API_URL: http://api:9090

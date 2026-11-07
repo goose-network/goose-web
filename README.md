@@ -47,24 +47,30 @@ serving the API under the same origin.
 ## Run the whole stack
 
 `compose.yaml` brings up the engine (api) and this UI (web) with one
-command — the UI's nginx proxies `/api` to the engine over the compose
-network, so an empty base-URL connection (the default) just works:
+command — both run the images CI publishes to GHCR, so there is nothing
+to build locally. The UI's nginx proxies `/api` to the engine over the
+compose network, so an empty base-URL connection (the default) just
+works:
 
 ```sh
-docker compose up --build   # UI on http://localhost:8080, api on 127.0.0.1:9090
+docker compose up    # UI on http://localhost:8080, api on 127.0.0.1:9090
 ```
 
 - `api` runs the published engine image
-  (`ghcr.io/goose-network/goose:latest`; `docker compose pull api`
-  refreshes it). State — the metrics DB and the persisted config, so
-  every edit made through the UI — lives in the `goose-data` named
-  volume and survives restarts.
-- `web` builds this repo's image and points its nginx `/api` proxy at
-  `http://api:9090`. If `api` is recreated (new engine image), web
-  restarts too: nginx resolves the service name once at startup and
-  would otherwise keep proxying to the old container IP.
+  (`ghcr.io/goose-network/goose:latest`). State — the metrics DB and
+  the persisted config, so every edit made through the UI — lives in
+  the `goose-data` named volume and survives restarts.
+- `web` runs this repo's published image
+  (`ghcr.io/goose-network/goose-web:latest`) with its nginx `/api`
+  proxy pointed at `http://api:9090`. If `api` is recreated (new engine
+  image), web restarts too: nginx resolves the service name once at
+  startup and would otherwise keep proxying to the old container IP.
 - A fresh engine seeds the plugin-declared default provider (psiphon),
   so the providers page is populated with zero configuration.
+
+`docker compose pull` refreshes both images (each repo's CI publishes
+on pushes to its main). To run a local checkout instead, swap the `web`
+service's `image:` for `build: .` — the same Dockerfile CI builds.
 
 Port overrides: `GOOSE_WEB_PORT` (default 8080) for the UI, and
 `GOOSE_API_PORT` / `GOOSE_API_BIND` (default 9090 on loopback) for
