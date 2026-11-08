@@ -910,6 +910,13 @@ button:disabled {
   padding: 2px 0 8px;
 }
 
+/* name/value rows (request headers, header assertions) share the width;
+   StringList's single input keeps the existing first-child rule */
+.arr-editor .item-row.split input {
+  flex: 1;
+  min-width: 0;
+}
+
 .kv-editor .item-row {
   display: flex;
   gap: 8px;
@@ -1010,6 +1017,103 @@ button:disabled {
 .count-hint {
   font-size: 11.5px;
   color: var(--text-muted);
+}
+
+/* --- reachability probe --- */
+
+/* Section headings inside a card: the card's h2 owns the title, these split
+   one form into its parts (request / assertions, sweep / HTTP probe). */
+.card-sub {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 18px 0 10px;
+}
+
+/* A chip is either a toggle (route picker) or a one-click add (presets); both
+   are small enough that a row of full-size controls would drown the form. */
+.chip-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  background: var(--surface-2);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+  cursor: pointer;
+  user-select: none;
+}
+
+button.chip {
+  font-family: inherit;
+}
+
+.chip.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text-primary);
+}
+
+.chip input {
+  margin: 0;
+}
+
+/* Assertion verdicts: a pass/fail count, then one pill per assertion whose
+   title carries the value actually seen. */
+.verdicts {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* The raw-request paste box is an alternative to the fields above it, so it
+   stays folded until asked for. Opening one needs the gap .field cannot give
+   it: a <summary> is the box's first child, not a labelled control. */
+.paste-box summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.paste-box[open] summary {
+  margin-bottom: 8px;
+}
+
+/* Response bodies are up to a megabyte, so they stay folded until asked for
+   and scroll inside their own box rather than stretching the row. */
+.probe-detail summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.probe-error {
+  margin-top: 6px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.probe-body {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  max-height: 220px;
+  overflow: auto;
+  background: var(--surface-sunken);
+  border-radius: var(--radius-m);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* --- two-up chart grid on wide screens --- */

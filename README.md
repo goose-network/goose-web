@@ -135,17 +135,21 @@ docker run -p 8080:8080 -e GOOSE_API_URL=http://host.docker.internal:9090 \
 | `/pools`              | pools (outbound sets + filters + selector) CRUD             |
 | `/chains`            | request chains (pool layers) CRUD + reachability probes for auto chains |
 | `/providers`          | dynamic outbound providers CRUD (subscription links feed a managed pool) |
-| `/exit-checks`        | exit IP per outbound, check history, and the check schedule |
+| `/exit-checks`        | exit IP per outbound: run one check now (sites + outbound subset, no schedule needed), check history, the shared site list, and the schedule |
+| `/probes`             | reachability probes: HTTP targets × chosen routes, with method/headers/body (or a pasted raw request), response assertions, manual or scheduled runs, and the recorded history |
 | `/metrics`            | request dashboard: KPI tiles, volume/latency trends, per-inbound volume, top targets, raw table |
 
 | File                       | Role                                                |
 | -------------------------- | ---------------------------------------------------- |
 | `src/sdk.tsx`              | `Goose` SDK instance in React context + connection UI |
 | `src/theme.tsx`            | light/dark/system theme provider (`data-theme`)      |
-| `src/useAsync.ts`          | fetch-on-mount hook (reload, held render on refresh)  |
+| `src/useAsync.ts`          | fetch-on-mount hook (reload, held render on refresh) + `useSeededDraft` for edit forms |
 | `src/useResource.ts`       | CRUD-page hook: list + create/edit/delete over `useAsync` |
+| `src/runApi.ts`            | endpoints newer than the pinned SDK (single-run exit checks, HTTP probes), called through the SDK's own client |
 | `src/validate.ts`          | field validators (required, host:port, http url)      |
 | `src/format.ts`            | duration / count / time display helpers               |
 | `src/charts/*`             | LineChart, BarChart, StatTile + palette                |
 | `src/pages/*`             | one panel per resource                                 |
+| `src/pages/probeSpec.ts`   | raw-HTTP-request parser, probe spec builder, response assertions (pure, unit-tested) |
+| `src/pages/checkSites.ts`  | exit-check site presets + single-run spec builder (pure, unit-tested) |
 | `src/components/*`         | DataTable, FormCard, fields, ConfirmButton, Notice, SearchInput, StringList, PageHeader, ThemeToggle, icons |

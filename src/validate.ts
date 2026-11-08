@@ -61,3 +61,24 @@ export function collect(
   }
   return out;
 }
+
+/**
+ * cleanList normalizes a string-list field for the wire: trimmed, empties
+ * dropped, duplicates removed with the first occurrence kept.
+ *
+ * Every list in this app is pasted or typed one row at a time, so all three
+ * happen routinely. Deduplicating is not just tidiness: a repeated check site
+ * doubles the load on one host, and a repeated probe target doubles the
+ * round, for no extra information.
+ */
+export function cleanList(values: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of values) {
+    const v = raw.trim();
+    if (v === "" || seen.has(v)) continue;
+    seen.add(v);
+    out.push(v);
+  }
+  return out;
+}

@@ -70,6 +70,7 @@ await test("every route renders its page", async () => {
     ["/chains", "Chains"],
     ["/providers", "Providers"],
     ["/exit-checks", "Exit IP"],
+    ["/probes", "Reachability probe"],
     ["/metrics", "Metrics"],
   ];
   for (const [path, title] of routes) {
@@ -263,6 +264,64 @@ await test("exit IP page renders checks or its empty state", async () => {
   assert.ok(
     /Current exit IP per outbound|No exit-IP checks recorded yet/.test(bodyText),
     `neither table nor empty state: ${bodyText.slice(0, 200)}`,
+  );
+});
+
+await test("a single exit-IP run works with the schedule untouched", async () => {
+  await page.goto(`${BASE}/exit-checks`, { waitUntil: "networkidle" });
+  const runCard = page.locator("main .card").first();
+  const checkNow = runCard.locator("button.primary:has-text('Check now')");
+  await checkNow.waitFor({ timeout: 5_000 });
+
+  // A preset is one click from being in the list, and marks itself as being in
+  // it — whether this click put it there or the engine config already had it.
+  await runCard.locator("button.chip:has-text('ifconfig.me')").first().click();
+  await runCard
+    .locator("button.chip.on:has-text('ifconfig.me')")
+    .first()
+    .waitFor({ timeout: 5_000 });
+
+  await checkNow.click();
+  // Either this run's records, or a note saying the round is still going / the
+  // engine has no run endpoint. Doing nothing at all is the failure.
+  await runCard.locator("h3.card-sub, .notice").first().waitFor({ timeout: 40_000 });
+  assert.match(
+    await runCard.innerText(),
+    // /i: the results heading is styled uppercase, and innerText reports the
+    // rendered text.
+    /This run|still running|round started|newer engine build|not wired a runner/i,
+    "run card said nothing after Check now",
+  );
+});
+
+await test("probe page renders the run form and a history or an explanation", async () => {
+  await page.goto(`${BASE}/probes`, { waitUntil: "networkidle" });
+  const bodyText = await page.locator("main").innerText();
+  assert.match(bodyText, /Reachability probe/, "probe heading missing");
+  // The form is static, so it renders whatever the engine supports.
+  assert.ok((await page.locator("#probe-method").count()) > 0, "method select missing");
+  assert.ok((await page.locator("#probe-expect-status").count()) > 0, "assertion field missing");
+  assert.ok(
+    /No probes recorded yet|Showing \d+ of \d+|newer engine build|not wired a runner/.test(
+      bodyText,
+    ),
+    `history has neither rows, an empty state, nor an explanation: ${bodyText.slice(-300)}`,
+  );
+});
+
+await test("a probe run answers, or explains why it cannot", async () => {
+  await page.goto(`${BASE}/probes`, { waitUntil: "networkidle" });
+  await page.click("button:has-text('Add target')");
+  await page.locator("#probe-targets").fill("https://www.gstatic.com/generate_204");
+  await page.click("main button.primary:has-text('Probe now')");
+  await page
+    .locator("main h2:has-text('Results'), main .notice")
+    .first()
+    .waitFor({ timeout: 40_000 });
+  assert.match(
+    await page.locator("main").innerText(),
+    /Results|newer engine build|not wired a runner/,
+    "no results and no explanation after Probe now",
   );
 });
 

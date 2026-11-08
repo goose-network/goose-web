@@ -2,7 +2,7 @@
 // the engine, so the boundary cases here are the ones the forms rely on.
 
 import { describe, expect, it } from "vitest";
-import { collect, hostPort, httpUrl, required, upstreamRoute } from "./validate";
+import { cleanList, collect, hostPort, httpUrl, required, upstreamRoute } from "./validate";
 
 const MSG = "bad";
 
@@ -72,5 +72,18 @@ describe("collect", () => {
   it("drops nulls and keeps messages", () => {
     expect(collect({ a: null, b: MSG })).toEqual({ b: MSG });
     expect(collect({ a: null })).toEqual({});
+  });
+});
+
+describe("cleanList", () => {
+  it("trims, drops empties and keeps the first of a duplicate", () => {
+    expect(cleanList([" b ", "", "a", "b", "   ", "a"])).toEqual(["b", "a"]);
+  });
+
+  it("leaves an empty list empty rather than inventing values", () => {
+    // Empty is meaningful to the engine (its own defaults), so a list field
+    // must stay empty rather than get filled in on the way out.
+    expect(cleanList([])).toEqual([]);
+    expect(cleanList(["", "  "])).toEqual([]);
   });
 });

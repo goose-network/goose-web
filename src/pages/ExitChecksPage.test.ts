@@ -1,9 +1,10 @@
 // src/pages/ExitChecksPage.test.ts — derivations behind the exit-IP page:
-// latest-per-outbound (history is newest-first) and the outbound id index.
+// latest-per-outbound (history is newest-first), the outbound id index, and the
+// row attribution that lets a detached round's polling recognize its own rows.
 
 import { describe, expect, it } from "vitest";
 import type { ExitCheck } from "@goose-network/goose-sdk";
-import { latestPerOutbound, outboundIDs } from "./ExitChecksPage";
+import { latestPerOutbound, outboundIDs, rowsSince } from "./ExitChecksPage";
 
 // latency arrives on the wire as a nanosecond count, but the generated schema
 // type models time.Duration as an enum — tests build checks with a plain
@@ -66,5 +67,39 @@ describe("outboundIDs", () => {
 
   it("returns an empty list for no data", () => {
     expect(outboundIDs([])).toEqual([]);
+  });
+});
+
+describe("rowsSince", () => {
+  // A run started at 05:09; the engine's own timestamps are only used in the
+  // no-baseline fallback, so the exact value here does not matter.
+  const started = Date.parse("2026-11-08T05:09:00Z");
+
+  it("takes the rows newer than the pre-run baseline", () => {
+    const rows = [check({ id: "c3" }), check({ id: "c2" }), check({ id: "c1" })];
+    expect(rowsSince(rows, "c1", started).map((c) => c.id)).toEqual(["c3", "c2"]);
+  });
+
+  it("reads a baseline that is still the newest as nothing recorded yet", () => {
+    const rows = [check({ id: "c2" }), check({ id: "c1" })];
+    expect(rowsSince(rows, "c2", started)).toEqual([]);
+  });
+
+  it("does not invent rows for a baseline it cannot find", () => {
+    // Pushed out of the fetched window, or a round that has written nothing:
+    // either way, attributing the whole page to this run would be a guess.
+    expect(rowsSince([check({ id: "c9" })], "gone", started)).toEqual([]);
+  });
+
+  it("falls back to timestamps when there is no baseline", () => {
+    const rows = [
+      check({ id: "new", startedAt: "2026-11-08T05:09:30Z" }),
+      check({ id: "old", startedAt: "2026-11-08T04:00:00Z" }),
+    ];
+    expect(rowsSince(rows, undefined, started).map((c) => c.id)).toEqual(["new"]);
+  });
+
+  it("skips a row with no parseable timestamp in the fallback", () => {
+    expect(rowsSince([check({ id: "x", startedAt: "" })], undefined, started)).toEqual([]);
   });
 });

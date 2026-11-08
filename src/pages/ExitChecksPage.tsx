@@ -1,22 +1,43 @@
-// src/pages/ExitChecksPage.tsx — exit-IP checks: per-outbound latest exit IP,
-// check history (per site + time — the exit varies by both), the engine's
-// scheduler config (cron / interval / sites / load spreading), and an
-// on-demand "Check now" trigger.
+// src/pages/ExitChecksPage.tsx — exit-IP checks: a one-off check of any site
+// through any outbound, the recorded history, the shared check-site list, and
+// the optional schedule.
 //
 // A proxy's connect address is NOT its exit address, and the exit can vary
 // by target site and over time — so this page shows the (outbound, site,
 // exit IP, time) tuples the engine records rather than a single "the" IP.
+//
+// The single run is deliberately independent of the schedule: the engine keeps
+// its configured sites, timeout and concurrency even while the scheduler is
+// off, so "check this site through this outbound, once" needs nothing turned
+// on and writes nothing but the check's own records.
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSdk } from "../sdk";
-import { errMessage, useAsync } from "../useAsync";
+import { errMessage, useAsync, useSeededDraft, type AsyncState } from "../useAsync";
 import { PageHeader } from "../components/PageHeader";
 import { DataTable, EmptyState, type Column } from "../components/DataTable";
 import { Notice, useToast } from "../components/Notice";
-import { CheckField, NumberField, SelectField, TextField } from "../components/fields";
+import {
+  CheckField,
+  FieldGroup,
+  NumberField,
+  SelectField,
+  TextField,
+} from "../components/fields";
 import { StringList } from "../components/StringList";
 import { formatDuration, formatTime } from "../format";
-import type { Engine, ExitCheck } from "@goose-network/goose-sdk";
+import {
+  buildExitRunSpec,
+  CHECK_SITE_PRESETS,
+  effectiveNumber,
+  ENGINE_DEFAULT_CONCURRENCY,
+  ENGINE_DEFAULT_SITES,
+  ENGINE_DEFAULT_TIMEOUT_SEC,
+  firstBadSite,
+} from "./checkSites";
+import { runExitChecksNow, stillRunning } from "../runApi";
+import { cleanList } from "../validate";
+import type { Engine, ExitCheck, ExitCheckConfig } from "@goose-network/goose-sdk";
 
 // outboundIDs returns the distinct outbound ids in a check list, sorted.
 export function outboundIDs(checks: ExitCheck[]): string[] {
@@ -36,7 +57,33 @@ export function latestPerOutbound(checks: ExitCheck[]): Map<string, ExitCheck> {
   return latest;
 }
 
-const ROW_OPTIONS = [100, 500, 1000, 5000];
+/**
+ * rowsSince picks a detached round's rows out of the history: everything newer
+ * than the row that was newest when the run started. Identity beats timestamps
+ * here — the engine's clock is not the browser's, and a skewed host would make
+ * a startedAt comparison find nothing or everything. The fallback covers a run
+ * started before the history loaded, where there is no baseline to compare to;
+ * it is the one path that has to trust a clock, so it allows a little skew.
+ *
+ * A baseline that is not in the window means the round has written nothing yet
+ * (or the window moved past it), which reads as "keep looking".
+ */
+export function rowsSince(
+  rows: ExitCheck[],
+  baselineId: string | undefined,
+  startedAtMs: number,
+): ExitCheck[] {
+  if (baselineId !== undefined) {
+    const at = rows.findIndex((c) => c.id === baselineId);
+    return at === -1 ? [] : rows.slice(0, at);
+  }
+  return rows.filter((c) => Date.parse(c.startedAt ?? "") >= startedAtMs - 5_000);
+}
+
+/** History depths on offer. The default has to be one of them: a select whose
+ *  value matches no option renders blank, which reads as "no depth chosen". */
+const ROW_OPTIONS = [100, 200, 500, 1000, 5000];
+const ROWS_DEFAULT = 200;
 const PAGE = 50;
 
 export function ExitChecksPage() {
@@ -44,7 +91,7 @@ export function ExitChecksPage() {
     <>
       <PageHeader
         title="Exit IP"
-        sub="The public IP observed at each outbound's exit — checked through the proxy itself, recorded over time, on a cron schedule."
+        sub="The public IP observed at each outbound's exit, checked through the proxy itself. Run one check now — no schedule needed — or put it on a cron."
       />
       <ExitChecksCard />
     </>
@@ -53,35 +100,27 @@ export function ExitChecksPage() {
 
 function ExitChecksCard() {
   const { goose } = useSdk();
-  const { toast } = useToast();
-  const [rows, setRows] = useState<number>(200);
+  const [rows, setRows] = useState<number>(ROWS_DEFAULT);
   const [outboundFilter, setOutboundFilter] = useState<string>("");
+  // A run writes the same rows the history lists, so finishing one refreshes
+  // the other.
+  const [ranAt, setRanAt] = useState(0);
+  const onRan = useCallback(() => setRanAt((n) => n + 1), []);
+  // Bumped when the run card saves its site list as the defaults, so the Check
+  // sites card re-seeds from what was stored instead of showing a list that is
+  // now stale — and would overwrite it if the reader pressed Save there.
+  const [sitesVersion, setSitesVersion] = useState(0);
+  const onSavedSites = useCallback(() => setSitesVersion((n) => n + 1), []);
 
-  const checks = useAsync(() => goose.listExitChecks({ n: rows }), [goose, rows]);
+  const checks = useAsync(
+    () => goose.listExitChecks({ n: rows }),
+    [goose, rows, ranAt],
+  );
   const engine = useAsync(() => goose.getEngine(), [goose]);
-
-  const [running, setRunning] = useState(false);
-  const [runError, setRunError] = useState<string | null>(null);
 
   const items = checks.data ?? [];
   const outbounds = useMemo(() => outboundIDs(items), [items]);
   const latestByOutbound = useMemo(() => latestPerOutbound(items), [items]);
-
-  const runNow = async () => {
-    setRunning(true);
-    setRunError(null);
-    try {
-      await goose.runExitChecks();
-      toast("Exit checks started — results arrive in a few seconds");
-      // Results land in the background; poll shortly after.
-      setTimeout(() => checks.reload(), 1500);
-      setTimeout(() => checks.reload(), 4000);
-    } catch (err) {
-      setRunError(errMessage(err));
-    } finally {
-      setRunning(false);
-    }
-  };
 
   const filtered =
     outboundFilter === ""
@@ -90,6 +129,13 @@ function ExitChecksCard() {
 
   return (
     <>
+      <SingleRunCard
+        engine={engine}
+        onRan={onRan}
+        onSavedSites={onSavedSites}
+        newestId={items[0]?.id}
+      />
+
       <div className="filter-bar">
         <SelectField
           id="exit-outbound"
@@ -110,19 +156,7 @@ function ExitChecksCard() {
         <button type="button" onClick={checks.reload} disabled={checks.loading}>
           {checks.loading ? "Refreshing…" : "Refresh"}
         </button>
-        <button
-          type="button"
-          className="primary"
-          onClick={() => void runNow()}
-          disabled={running}
-        >
-          {running ? "Starting…" : "Check now"}
-        </button>
       </div>
-
-      {runError !== null && (
-        <Notice onDismiss={() => setRunError(null)}>{runError}</Notice>
-      )}
 
       <LatestExits latest={latestByOutbound} loading={checks.loading} />
 
@@ -136,10 +170,499 @@ function ExitChecksCard() {
         onResetFilter={() => setOutboundFilter("")}
       />
 
-      <ExitCheckConfigCard engine={engine} />
+      <CheckSitesCard engine={engine} refreshKey={sitesVersion} />
+      <ScheduleCard engine={engine} />
     </>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Single run
+// ---------------------------------------------------------------------------
+
+/**
+ * useExitCheckConfig saves a patch of engine.exit_checks, merged into what the
+ * engine holds *now* — fetched at save time, not read from a possibly stale
+ * load. The merge is the point: the site list and the schedule are edited by
+ * separate cards, and a whole-object PUT from either would silently drop the
+ * other's fields.
+ *
+ * It does not make two saves at once safe. The engine's config is one resource
+ * with no per-field endpoint, so a second PUT still carries the base it read
+ * before the first landed; the window is one round trip, and each card has a
+ * single save button.
+ */
+function useExitCheckConfig(engine: AsyncState<Engine>) {
+  const { goose } = useSdk();
+  const { toast } = useToast();
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const save = async (
+    patch: Partial<ExitCheckConfig>,
+    message: string,
+  ): Promise<boolean> => {
+    setSaving(true);
+    setError(null);
+    try {
+      const current = await goose.getEngine();
+      await goose.setEngine({
+        ...current,
+        exit_checks: { ...(current.exit_checks ?? {}), ...patch },
+      });
+      toast(message);
+      engine.reload();
+      return true;
+    } catch (err) {
+      setError(errMessage(err));
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return { save, saving, error, dismiss: () => setError(null) };
+}
+
+/** How often, and for how long, to look for a detached round's rows after the
+ *  engine answers 202. The engine itself waited 25s; a round that outlives that
+ *  is usually stuck on one slow site, so a further half minute catches it
+ *  without hammering the API. */
+const POLL_EVERY_MS = 3_000;
+const POLL_TRIES = 10;
+
+/** Notice text while a detached round is in flight. The engine's own message
+ *  ("… results appear in GET /api/exit-checks") is written for an API reader,
+ *  so the page says the same thing in its own words. */
+const STILL_RUNNING =
+  "The round is still running — the engine stopped waiting for it after 25s. This card keeps looking for its rows, and the history below refreshes as they are recorded.";
+
+const GAVE_UP_POLLING =
+  "The round recorded nothing in the half minute after the engine handed it back. It may still be waiting on a slow site — press Refresh to look again.";
+
+/** The one-off task: pick sites and outbounds, check them now, read the answer
+ *  here. Nothing about it requires the schedule to be enabled. */
+function SingleRunCard({
+  engine,
+  onRan,
+  onSavedSites,
+  newestId,
+}: {
+  engine: AsyncState<Engine>;
+  onRan: () => void;
+  /** the run card just saved the shared site list; the card below must re-seed */
+  onSavedSites: () => void;
+  /** newest history row when the run started — see rowsSince */
+  newestId: string | undefined;
+}) {
+  const { goose } = useSdk();
+  const { toast } = useToast();
+  const cfg = useExitCheckConfig(engine);
+  const outbounds = useAsync(() => goose.listOutbounds(), [goose]);
+
+  const saved = engine.data?.exit_checks?.sites ?? [];
+  const [sites, setSites] = useState<string[]>([]);
+  const [touched, setTouched] = useState(false);
+  const [only, setOnly] = useState<string[]>([]);
+  const [timeoutSec, setTimeoutSec] = useState(0);
+  const [concurrency, setConcurrency] = useState(0);
+  const [results, setResults] = useState<ExitCheck[] | null>(null);
+  const [pending, setPending] = useState<string | null>(null);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Seed the site list from the saved config once, so a run repeats the usual
+  // check by default — but never again, or clearing a site would undo itself.
+  const [seeded, setSeeded] = useState(false);
+  useEffect(() => {
+    if (engine.data !== undefined && !seeded) {
+      setSites(engine.data.exit_checks?.sites ?? []);
+      setSeeded(true);
+    }
+  }, [engine.data, seeded]);
+
+  // Polling timers for a detached round, cleared on unmount: navigating away
+  // mid-poll must not leave callbacks landing in a dead tree.
+  const timers = useRef<number[]>([]);
+  useEffect(
+    () => () => {
+      for (const t of timers.current) window.clearTimeout(t);
+      timers.current = [];
+    },
+    [],
+  );
+  const after = (ms: number, fn: () => void) => {
+    timers.current.push(window.setTimeout(fn, ms));
+  };
+
+  const ids = useMemo(
+    () =>
+      (outbounds.data ?? [])
+        .map((o) => o.id)
+        .filter((id): id is string => id !== undefined && id !== "")
+        .sort(),
+    [outbounds.data],
+  );
+  const badSite = useMemo(() => firstBadSite(sites), [sites]);
+  // "Save as the defaults" only lights up once the reader has edited *this*
+  // list. `saved` moves whenever the Check sites card saves, and comparing
+  // against it alone would offer to undo that save with this card's older copy.
+  const dirty = touched && sites.join("\n") !== saved.join("\n");
+
+  /** Every edit marks the list as the reader's own, which is what lets the save
+   *  button tell "edited here" from "changed by the card below". */
+  const editSites = (next: string[] | ((v: string[]) => string[])) => {
+    setTouched(true);
+    setSites(next);
+  };
+
+  /** The completed-round path, shared by an inline answer and a polled one. */
+  const show = (checks: ExitCheck[]) => {
+    setResults(checks);
+    setPending(null);
+    const ok = checks.filter((c) => c.success === true).length;
+    toast(
+      `${checks.length} exit check${checks.length === 1 ? "" : "s"}: ${ok} answered`,
+      checks.length > 0 && ok === checks.length ? "good" : "bad",
+    );
+  };
+
+  /** Look for a detached round's rows, refreshing the history each time so the
+   *  table below stays live whether or not this card finds them. */
+  const poll = (
+    baseline: string | undefined,
+    startedAt: number,
+    attempt: number,
+  ) => {
+    after(POLL_EVERY_MS, () => {
+      onRan();
+      void (async () => {
+        try {
+          const rows = await goose.listExitChecks({ n: ROWS_DEFAULT });
+          const mine = rowsSince(rows, baseline, startedAt);
+          if (mine.length > 0) {
+            show(mine);
+            return;
+          }
+        } catch {
+          // The history below surfaces its own load error; keep looking.
+        }
+        if (attempt + 1 < POLL_TRIES) poll(baseline, startedAt, attempt + 1);
+        else setPending(GAVE_UP_POLLING);
+      })();
+    });
+  };
+
+  const run = async () => {
+    if (badSite !== undefined) return;
+    // Captured before the request: the history this card is handed moves while
+    // a round is in flight, and rowsSince needs the pre-run newest row.
+    const baseline = newestId;
+    const startedAt = Date.now();
+    setRunning(true);
+    setError(null);
+    setResults(null);
+    setPending(null);
+    try {
+      const res = await runExitChecksNow(
+        goose,
+        buildExitRunSpec({ sites, outbounds: only, timeoutSec, concurrency }),
+      );
+      if (stillRunning(res)) {
+        setPending(STILL_RUNNING);
+        toast("Exit checks still running — results will appear below");
+        poll(baseline, startedAt, 0);
+      } else {
+        show(res.checks ?? []);
+        onRan();
+      }
+    } catch (err) {
+      setError(errMessage(err));
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h2>Run a check now</h2>
+        <div className="spacer" />
+        <span className="pill">
+          {sites.length === 0 ? "engine's sites" : `${sites.length} site${sites.length === 1 ? "" : "s"}`}
+        </span>
+        <span className="pill">
+          {only.length === 0
+            ? "every outbound"
+            : `${only.length} outbound${only.length === 1 ? "" : "s"}`}
+        </span>
+        <button
+          type="button"
+          className="primary"
+          onClick={() => void run()}
+          disabled={running || badSite !== undefined}
+          title={
+            badSite !== undefined
+              ? "Fix the check site first — the engine needs an absolute http(s) URL"
+              : undefined
+          }
+        >
+          {running ? "Checking…" : "Check now"}
+        </button>
+      </div>
+      <p className="hint">
+        Dials each chosen outbound and asks a check site what IP it sees, once, right now. This
+        works with the schedule turned off and changes no configuration. Outbounds with no server
+        address (direct, tunnel) have no exit of their own and are skipped.
+      </p>
+
+      <StringList
+        id="run-sites"
+        label="Check sites for this run"
+        mono
+        values={sites}
+        placeholder="https://ifconfig.me"
+        addLabel="Add site"
+        hint="Empty uses the saved list below, or the engine's built-in defaults when that is empty too. Each outbound is checked against one site, rotating round-robin."
+        onChange={editSites}
+      />
+      <SitePresets
+        sites={sites}
+        onAdd={(url) => editSites((v) => (v.includes(url) ? v : [...v, url]))}
+      />
+      {badSite !== undefined && (
+        // The engine rejects a site with no scheme, and this page shows sites
+        // without theirs everywhere else, so the mistake is easy to make and
+        // its failure ("bad site URL") lands a long way from the field.
+        <Notice>
+          "{badSite}" is not an absolute http(s) URL. A check site needs its
+          scheme — https://{badSite.replace(/^https?:\/\//, "")} — or every
+          check against it fails.
+        </Notice>
+      )}
+
+      <div className="row">
+        <NumberField
+          id="run-timeout"
+          label="Per-check timeout (s)"
+          min={1}
+          // The config resource has no omitempty, so an engine nobody configured
+          // reports 0 here; show what it will actually use instead.
+          placeholder={effectiveNumber(
+            engine.data?.exit_checks?.timeout_seconds,
+            ENGINE_DEFAULT_TIMEOUT_SEC,
+          )}
+          hint="Empty uses the configured timeout — the placeholder is what the engine will use."
+          value={timeoutSec}
+          onChange={setTimeoutSec}
+        />
+        <NumberField
+          id="run-concurrency"
+          label="Concurrency"
+          min={1}
+          placeholder={effectiveNumber(
+            engine.data?.exit_checks?.concurrency,
+            ENGINE_DEFAULT_CONCURRENCY,
+          )}
+          hint="How many outbounds are checked at once."
+          value={concurrency}
+          onChange={setConcurrency}
+        />
+      </div>
+
+      <FieldGroup
+        id="run-outbounds"
+        label="Outbounds"
+        hint="Nothing selected checks every outbound that has a server address."
+      >
+        <div className="chip-grid">
+          <label className={`chip${only.length === 0 ? " on" : ""}`}>
+            <input
+              type="checkbox"
+              checked={only.length === 0}
+              onChange={() => setOnly([])}
+            />
+            every outbound
+          </label>
+          {ids.map((id) => (
+            <label key={id} className={`chip${only.includes(id) ? " on" : ""}`}>
+              <input
+                type="checkbox"
+                checked={only.includes(id)}
+                onChange={() =>
+                  setOnly((v) =>
+                    v.includes(id) ? v.filter((x) => x !== id) : [...v, id],
+                  )
+                }
+              />
+              <span className="mono">{id}</span>
+            </label>
+          ))}
+        </div>
+        {ids.length === 0 && !outbounds.loading && outbounds.error === null && (
+          <div className="field-hint">
+            No outbounds are configured yet — add one on the Outbounds page first.
+          </div>
+        )}
+      </FieldGroup>
+
+      {error !== null && <Notice onDismiss={() => setError(null)}>{error}</Notice>}
+      {cfg.error !== null && (
+        <Notice onDismiss={cfg.dismiss}>{cfg.error}</Notice>
+      )}
+      {outbounds.error !== null && (
+        // Without the list the picker shows only "every outbound", so the
+        // reader cannot tell an empty config from a failed request.
+        <Notice>Could not list outbounds: {outbounds.error}</Notice>
+      )}
+      {pending !== null && <Notice kind="info">{pending}</Notice>}
+
+      {results !== null && <RunResults checks={results} />}
+
+      <div className="toolbar" style={{ marginBottom: 0 }}>
+        <button
+          type="button"
+          onClick={() =>
+            void cfg
+              // cleanList, not a bare filter: the engine stores these strings
+              // verbatim and rejects one it cannot parse, so a trailing space
+              // would be saved into every later round, and a duplicate would
+              // double one host's load per round.
+              .save({ sites: cleanList(sites) }, "Check sites saved")
+              .then((ok) => {
+                if (!ok) return;
+                setTouched(false);
+                onSavedSites();
+              })
+          }
+          disabled={cfg.saving || !dirty || badSite !== undefined}
+          title={
+            badSite !== undefined
+              ? "Fix the check site first — the engine needs an absolute http(s) URL"
+              : dirty
+                ? "Save this run's site list as the list every run and schedule uses"
+                : "Same as the saved list"
+          }
+        >
+          {cfg.saving ? "Saving…" : "Save these sites as the defaults"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** The curated site list, one click per site. A site already in the list shows
+ *  selected rather than being offered twice. */
+function SitePresets({
+  sites,
+  onAdd,
+}: {
+  sites: string[];
+  onAdd: (url: string) => void;
+}) {
+  return (
+    <>
+      {CHECK_SITE_PRESETS.map((group) => {
+        const id = `site-presets-${group.group.toLowerCase().replace(/\W+/g, "-")}`;
+        return (
+          <FieldGroup id={id} label={group.group} key={id}>
+            <div className="chip-grid">
+              {group.sites.map((s) => (
+                <button
+                  type="button"
+                  className={`chip${sites.includes(s.url) ? " on" : ""}`}
+                  key={s.url}
+                  title={`${s.url} — ${s.note}`}
+                  onClick={() => onAdd(s.url)}
+                >
+                  {s.url.replace(/^https?:\/\//, "")}
+                </button>
+              ))}
+            </div>
+          </FieldGroup>
+        );
+      })}
+    </>
+  );
+}
+
+/** A check record's columns, without the time: a run's table ends with when
+ *  it was checked, the history leads with it. */
+const checkColumns: Array<Column<ExitCheck>> = [
+  { key: "ob", header: "Outbound", className: "mono", render: (c) => c.outboundID || "—" },
+  {
+    key: "ip",
+    header: "Exit IP",
+    className: "mono",
+    render: (c) => (c.success === true ? c.exitIP || "—" : "—"),
+  },
+  { key: "site", header: "Site", className: "mono", render: (c) => c.site || "—" },
+  {
+    key: "result",
+    header: "Result",
+    render: (c) =>
+      c.success === true ? (
+        <span className="pill ok">ok</span>
+      ) : (
+        <span className="pill fail" title={c.error ?? ""}>
+          {c.error || "failed"}
+        </span>
+      ),
+  },
+  {
+    key: "latency",
+    header: "Latency",
+    className: "num",
+    render: (c) => (c.success === true ? formatDuration(c.latency ?? 0) : "—"),
+  },
+];
+
+const timeColumn: Column<ExitCheck> = {
+  key: "when",
+  header: "Time",
+  className: "nowrap",
+  render: (c) => formatTime(c.startedAt ?? ""),
+};
+
+// The history is a log, so it leads with the time; a single run's table leads
+// with the outbound and puts the time last.
+const historyColumns: Array<Column<ExitCheck>> = [timeColumn, ...checkColumns];
+
+/** The records the run returned, in the card that ran it: waiting for the
+ *  history to reload before showing an answer would be a slower way to say the
+ *  same thing. */
+function RunResults({ checks }: { checks: ExitCheck[] }) {
+  // Distinct exits is the answer most readers came for: one IP means every
+  // outbound left through the same door, which is usually not what a proxy
+  // fleet is for.
+  const ips = new Set(
+    checks.filter((c) => c.success === true && c.exitIP !== "").map((c) => c.exitIP),
+  );
+  return (
+    <>
+      <h3 className="card-sub">
+        This run — {checks.length} check{checks.length === 1 ? "" : "s"}, {ips.size} distinct exit
+        IP{ips.size === 1 ? "" : "s"}
+      </h3>
+      <DataTable
+        caption="Results of the run just made"
+        columns={[...checkColumns, { ...timeColumn, header: "Checked" }]}
+        rows={checks}
+        rowKey={(c) => `${c.id ?? ""}-${c.outboundID ?? ""}-${c.site ?? ""}`}
+        empty={
+          <EmptyState
+            title="No checks ran"
+            hint="Every outbound was skipped — none has a server address to dial through."
+          />
+        }
+      />
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// History
+// ---------------------------------------------------------------------------
 
 const latestColumns: Array<Column<[string, ExitCheck]>> = [
   { key: "id", header: "Outbound", className: "mono", render: ([id]) => id },
@@ -211,42 +734,12 @@ function ExitHistory({
   useEffect(() => setLimit(PAGE), [filteredBy, total]);
   const visible = checks.slice(0, limit);
 
-  const columns: Array<Column<ExitCheck>> = [
-    { key: "when", header: "Time", className: "nowrap", render: (c) => formatTime(c.startedAt ?? "") },
-    { key: "ob", header: "Outbound", className: "mono", render: (c) => c.outboundID || "—" },
-    { key: "site", header: "Site", className: "mono", render: (c) => c.site || "—" },
-    {
-      key: "ip",
-      header: "Exit IP",
-      className: "mono",
-      render: (c) => (c.success === true ? c.exitIP || "—" : "—"),
-    },
-    {
-      key: "result",
-      header: "Result",
-      render: (c) =>
-        c.success === true ? (
-          <span className="pill ok">ok</span>
-        ) : (
-          <span className="pill fail" title={c.error ?? ""}>
-            {c.error || "failed"}
-          </span>
-        ),
-    },
-    {
-      key: "latency",
-      header: "Latency",
-      className: "num",
-      render: (c) => (c.success === true ? formatDuration(c.latency ?? 0) : "—"),
-    },
-  ];
-
   return (
     <div className="card">
       <h2>History</h2>
       <DataTable
         caption="Exit-IP check history"
-        columns={columns}
+        columns={historyColumns}
         rows={visible}
         rowKey={(c) => `${c.id ?? ""}-${c.startedAt ?? ""}-${c.outboundID ?? ""}`}
         loading={loading}
@@ -256,7 +749,7 @@ function ExitHistory({
           total === 0 ? (
             <EmptyState
               title="No exit-IP checks recorded yet"
-              hint="Press “Check now” to probe every outbound, or enable the schedule below."
+              hint="Run a check above — no schedule needed — or turn the schedule on below."
             />
           ) : (
             <EmptyState
@@ -291,56 +784,120 @@ function ExitHistory({
   );
 }
 
-// ExitCheckConfigCard edits engine.exit_checks (the scheduler). Saving
-// round-trips through the engine resource; the API validates the cron
-// expression (400 on garbage).
-function ExitCheckConfigCard({
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+/** The saved site list, editable on its own: it is the input to both a single
+ *  run and the schedule, and neither needs the other. */
+function CheckSitesCard({
   engine,
+  refreshKey,
 }: {
-  engine: ReturnType<typeof useAsync<Engine>>;
+  engine: AsyncState<Engine>;
+  /** bumped when another card saved this list; see ExitChecksCard */
+  refreshKey: number;
 }) {
-  const { goose } = useSdk();
-  const { toast } = useToast();
-  type ExitCheckCfg = NonNullable<Engine["exit_checks"]>;
-  const [draft, setDraft] = useState<ExitCheckCfg | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
+  const cfg = useExitCheckConfig(engine);
+  // refreshKey is the run card's "I just saved this list" signal. Without it
+  // this draft keeps showing the previous list, and pressing Save here would
+  // put that straight back over the change just made.
+  const { draft: sites, setDraft: setSites, refresh } = useSeededDraft<
+    Engine,
+    string[]
+  >(engine.data, (e) => e.exit_checks?.sites ?? [], refreshKey);
 
-  useEffect(() => {
-    if (engine.data !== undefined && draft === null) {
-      setDraft({ ...(engine.data.exit_checks ?? {}) });
-    }
-  }, [engine.data, draft]);
+  if (sites === null) return null;
 
-  if (engine.error !== null)
+  const badSite = firstBadSite(sites);
+
+  return (
+    <div className="card">
+      <h2>Check sites</h2>
+      <p className="hint">
+        The sites a check asks for the exit IP, used by every run and by the schedule when they do
+        not name their own. Each must answer with nothing but an IP address — the engine reads at
+        most 64 bytes of the response and parses it, so a JSON or HTML answer fails the check.
+        Batches rotate round-robin across the list so a large test spreads its load instead of
+        hammering one site.
+      </p>
+      <StringList
+        id="exit-sites"
+        label="Sites"
+        mono
+        values={sites}
+        placeholder="https://ifconfig.me"
+        addLabel="Add site"
+        hint={`Empty uses the engine's built-in defaults: ${ENGINE_DEFAULT_SITES.join(", ")}.`}
+        onChange={setSites}
+      />
+      <SitePresets
+        sites={sites}
+        onAdd={(url) =>
+          // The state is nullable (null = "show what the engine has"), which
+          // the card never renders, but the updater still has to type-check.
+          setSites((v) => (v === null || v.includes(url) ? v : [...v, url]))
+        }
+      />
+      {badSite !== undefined && (
+        <Notice>
+          "{badSite}" is not an absolute http(s) URL. The engine rejects a site
+          without a scheme, so every check against it would fail.
+        </Notice>
+      )}
+      {cfg.error !== null && <Notice onDismiss={cfg.dismiss}>{cfg.error}</Notice>}
+      <div className="toolbar" style={{ marginBottom: 0 }}>
+        <button
+          type="button"
+          className="primary"
+          onClick={() =>
+            void cfg
+              // cleanList for the same reason as the run card's save: what goes
+              // in here is what every later round dials, verbatim.
+              .save({ sites: cleanList(sites) }, "Check sites saved")
+              .then((ok) => {
+                if (ok) refresh();
+              })
+          }
+          disabled={cfg.saving || badSite !== undefined}
+        >
+          {cfg.saving ? "Saving…" : "Save sites"}
+        </button>
+        <button type="button" onClick={() => setSites(null)} disabled={cfg.saving}>
+          Reset
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** The schedule alone. Sites moved out to their own card: a schedule is
+ *  optional, the site list is not. */
+function ScheduleCard({ engine }: { engine: AsyncState<Engine> }) {
+  const cfg = useExitCheckConfig(engine);
+  const { draft, setDraft, refresh } = useSeededDraft<Engine, ExitCheckConfig>(
+    engine.data,
+    (e) => {
+      // Sites are the Check sites card's to save: leaving them out of this
+      // draft is what keeps a schedule save from touching them.
+      const { sites: _sites, ...rest } = e.exit_checks ?? {};
+      return rest;
+    },
+  );
+
+  if (engine.error !== null) {
     return <Notice>Failed to load engine config: {engine.error}</Notice>;
+  }
   if (draft === null) return null;
 
-  const set = (patch: Partial<ExitCheckCfg>) => setDraft({ ...draft, ...patch });
-
-  const save = async () => {
-    if (engine.data === undefined) return;
-    setSaving(true);
-    setSaveError(null);
-    try {
-      await goose.setEngine({ ...engine.data, exit_checks: draft });
-      toast("Exit-check schedule saved");
-      setDraft(null);
-      engine.reload();
-    } catch (err) {
-      setSaveError(errMessage(err));
-    } finally {
-      setSaving(false);
-    }
-  };
+  const set = (patch: Partial<ExitCheckConfig>) => setDraft({ ...draft, ...patch });
 
   return (
     <div className="card">
       <h2>Scheduled checks</h2>
       <p className="hint">
-        The engine dials each outbound and asks a check site for the exit IP.
-        Batches rotate round-robin across the site list so large tests spread
-        load instead of hammering (or DDoSing) a single site.
+        Optional: runs the same check on a cron (or a plain interval) and records every result. The
+        single run above works with this switched off, and uses the same site list.
       </p>
       <div className="row">
         <CheckField
@@ -352,7 +909,7 @@ function ExitCheckConfigCard({
         <TextField
           id="exit-cron"
           label="Cron"
-          hint="5-field; overrides the interval when set."
+          hint="5-field crontab; overrides the interval when set. */5 * * * * every 5 minutes, 0 */6 * * * every 6 hours."
           mono
           placeholder="*/15 * * * *"
           value={draft.cron ?? ""}
@@ -363,6 +920,10 @@ function ExitCheckConfigCard({
           label="Interval (seconds)"
           min={60}
           placeholder="900"
+          // The engine floors an interval below 10s to 10s rather than treating
+          // 0 as "off", so an empty field with the schedule enabled means a
+          // round every ten seconds.
+          hint="Used when the cron is empty. Zero means the engine's 10s floor, which is rarely what you want."
           value={draft.interval_seconds ?? 0}
           onChange={(interval_seconds) => set({ interval_seconds })}
         />
@@ -370,7 +931,10 @@ function ExitCheckConfigCard({
           id="exit-timeout"
           label="Per-check timeout (s)"
           min={1}
-          placeholder="10"
+          // The engine's own defaults (config.ExitCheckConfig treats anything
+          // below 1 as 15s, and a concurrency below 1 as 4), not a guess.
+          placeholder={String(ENGINE_DEFAULT_TIMEOUT_SEC)}
+          hint="Empty uses the engine's default."
           value={draft.timeout_seconds ?? 0}
           onChange={(timeout_seconds) => set({ timeout_seconds })}
         />
@@ -378,35 +942,27 @@ function ExitCheckConfigCard({
           id="exit-concurrency"
           label="Concurrency"
           min={1}
-          placeholder="4"
+          placeholder={String(ENGINE_DEFAULT_CONCURRENCY)}
+          hint="Empty uses the engine's default."
           value={draft.concurrency ?? 0}
           onChange={(concurrency) => set({ concurrency })}
         />
       </div>
-      <StringList
-        id="exit-sites"
-        label="Check sites"
-        hint="Plain-text IP echoers; empty uses the built-in defaults."
-        values={draft.sites ?? []}
-        placeholder="https://ifconfig.me"
-        onChange={(sites) => set({ sites })}
-      />
-      {saveError !== null && (
-        <Notice onDismiss={() => setSaveError(null)}>{saveError}</Notice>
-      )}
+      {cfg.error !== null && <Notice onDismiss={cfg.dismiss}>{cfg.error}</Notice>}
       <div className="toolbar" style={{ marginBottom: 0 }}>
         <button
           type="button"
           className="primary"
-          onClick={() => void save()}
-          disabled={saving}
+          onClick={() =>
+            void cfg.save(draft, "Exit-check schedule saved").then((ok) => {
+              if (ok) refresh();
+            })
+          }
+          disabled={cfg.saving}
         >
-          {saving ? "Saving…" : "Save schedule"}
+          {cfg.saving ? "Saving…" : "Save schedule"}
         </button>
-        <button
-          type="button"
-          onClick={() => setDraft({ ...(engine.data?.exit_checks ?? {}) })}
-        >
+        <button type="button" onClick={() => setDraft(null)} disabled={cfg.saving}>
           Reset
         </button>
       </div>

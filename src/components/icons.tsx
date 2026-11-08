@@ -105,6 +105,13 @@ export const IconChart = (p: IconProps) => (
   </Svg>
 );
 
+/** A pulse trace: the shape of "did the request come back". */
+export const IconProbe = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M1.5 8.5h3l1.8-4 2.9 8 1.8-4h3.7" />
+  </Svg>
+);
+
 export const IconClose = (p: IconProps) => (
   <Svg {...p}>
     <path d="M4 4l8 8M12 4l-8 8" />

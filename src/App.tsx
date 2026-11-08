@@ -16,6 +16,7 @@ import {
   IconLink,
   IconMenu,
   IconOutbound,
+  IconProbe,
 } from "./components/icons";
 import { EnginePage } from "./pages/EnginePage";
 import { InboundsPage } from "./pages/InboundsPage";
@@ -25,6 +26,7 @@ import { ChainsPage } from "./pages/ChainsPage";
 import { ProvidersPage } from "./pages/ProvidersPage";
 import { MetricsPage } from "./pages/MetricsPage";
 import { ExitChecksPage } from "./pages/ExitChecksPage";
+import { ProbesPage } from "./pages/ProbesPage";
 
 interface NavItem {
   to: string;
@@ -52,6 +54,7 @@ const NAV: Array<{ label: string; items: NavItem[] }> = [
     label: "Observe",
     items: [
       { to: "/exit-checks", label: "Exit IP", Icon: IconGlobe },
+      { to: "/probes", label: "Probe", Icon: IconProbe },
       { to: "/metrics", label: "Metrics", Icon: IconChart },
     ],
   },
@@ -128,6 +131,7 @@ export function App() {
             <Route path="/chains" element={<ChainsPage />} />
             <Route path="/providers" element={<ProvidersPage />} />
             <Route path="/exit-checks" element={<ExitChecksPage />} />
+            <Route path="/probes" element={<ProbesPage />} />
             <Route path="/metrics" element={<MetricsPage />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
