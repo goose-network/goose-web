@@ -271,26 +271,39 @@ function SingleRunCard({
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Seed the site list from the saved config once, so a run repeats the usual
-  // check by default — but never again, or clearing a site would undo itself.
-  const [seeded, setSeeded] = useState(false);
+  // Until the reader edits it, the list mirrors the saved one: the first load
+  // seeds it, and a save made in the Check sites card below moves it too — so
+  // the field never disagrees with the list it would run. An edited list is the
+  // reader's own: a load landing mid-edit must not eat it, and `touched` is
+  // what tells the two apart. Seeding keys on the engine object itself, not on
+  // `touched` flipping: a save turns `touched` back off while its reload is
+  // still in flight, and re-seeding from that stale object would revert the
+  // list the reader just saved.
+  const seededFrom = useRef<Engine | undefined>(undefined);
   useEffect(() => {
-    if (engine.data !== undefined && !seeded) {
-      setSites(engine.data.exit_checks?.sites ?? []);
-      setSeeded(true);
-    }
-  }, [engine.data, seeded]);
+    if (engine.data === undefined) return;
+    const fresh = seededFrom.current !== engine.data;
+    seededFrom.current = engine.data;
+    if (fresh && !touched) setSites(engine.data.exit_checks?.sites ?? []);
+  }, [engine.data, touched]);
 
-  // Polling timers for a detached round, cleared on unmount: navigating away
-  // mid-poll must not leave callbacks landing in a dead tree.
+  // Polling timers for a detached round. `alive` and `runSeq` fence the chain:
+  // a timer that already fired can resume from an in-flight fetch after the
+  // card unmounted or a newer run started, and must neither re-arm nor write
+  // into the state that newer run now owns. The setup re-arms `alive` because
+  // StrictMode and HMR run the cleanup on a simulated unmount and keep the
+  // refs — a cleanup-only effect would leave the card dead for the session.
   const timers = useRef<number[]>([]);
-  useEffect(
-    () => () => {
+  const alive = useRef(true);
+  const runSeq = useRef(0);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
       for (const t of timers.current) window.clearTimeout(t);
       timers.current = [];
-    },
-    [],
-  );
+    };
+  }, []);
   const after = (ms: number, fn: () => void) => {
     timers.current.push(window.setTimeout(fn, ms));
   };
@@ -327,18 +340,28 @@ function SingleRunCard({
     );
   };
 
+  /** A chain is retired once the card unmounts or a newer run starts: from
+   *  there on it must neither re-arm a timer nor write into the state the
+   *  newer run (or the next page) owns. */
+  const retired = (myRun: number) =>
+    !alive.current || myRun !== runSeq.current;
+
   /** Look for a detached round's rows, refreshing the history each time so the
-   *  table below stays live whether or not this card finds them. */
+   *  table below stays live whether or not this card finds them. `myRun` is the
+   *  fence: any newer run (or an unmount) retires this chain wherever it is. */
   const poll = (
+    myRun: number,
     baseline: string | undefined,
     startedAt: number,
     attempt: number,
   ) => {
     after(POLL_EVERY_MS, () => {
+      if (retired(myRun)) return;
       onRan();
       void (async () => {
         try {
           const rows = await goose.listExitChecks({ n: ROWS_DEFAULT });
+          if (retired(myRun)) return;
           const mine = rowsSince(rows, baseline, startedAt);
           if (mine.length > 0) {
             show(mine);
@@ -347,7 +370,8 @@ function SingleRunCard({
         } catch {
           // The history below surfaces its own load error; keep looking.
         }
-        if (attempt + 1 < POLL_TRIES) poll(baseline, startedAt, attempt + 1);
+        if (retired(myRun)) return;
+        if (attempt + 1 < POLL_TRIES) poll(myRun, baseline, startedAt, attempt + 1);
         else setPending(GAVE_UP_POLLING);
       })();
     });
@@ -355,6 +379,12 @@ function SingleRunCard({
 
   const run = async () => {
     if (badSite !== undefined) return;
+    // Retire any chain still looking for an earlier detached round, or its next
+    // tick would read this run's rows as that round's and overwrite the table.
+    runSeq.current += 1;
+    const myRun = runSeq.current;
+    for (const t of timers.current) window.clearTimeout(t);
+    timers.current = [];
     // Captured before the request: the history this card is handed moves while
     // a round is in flight, and rowsSince needs the pre-run newest row.
     const baseline = newestId;
@@ -368,18 +398,24 @@ function SingleRunCard({
         goose,
         buildExitRunSpec({ sites, outbounds: only, timeoutSec, concurrency }),
       );
+      // The entry hop needs the same fence as the chain: the engine can hold
+      // this request for 25s, and the reader may navigate away mid-flight —
+      // an answer landing after the unmount would toast on an unrelated page
+      // and arm a timer the cleanup already detached.
+      if (retired(myRun)) return;
       if (stillRunning(res)) {
         setPending(STILL_RUNNING);
         toast("Exit checks still running — results will appear below");
-        poll(baseline, startedAt, 0);
+        poll(myRun, baseline, startedAt, 0);
       } else {
         show(res.checks ?? []);
         onRan();
       }
     } catch (err) {
+      if (retired(myRun)) return;
       setError(errMessage(err));
     } finally {
-      setRunning(false);
+      if (!retired(myRun)) setRunning(false);
     }
   };
 
@@ -863,12 +899,27 @@ function CheckSitesCard({
         >
           {cfg.saving ? "Saving…" : "Save sites"}
         </button>
-        <button type="button" onClick={() => setSites(null)} disabled={cfg.saving}>
+        <button
+          type="button"
+          // Re-seed in place: setting the draft to null would unmount this whole
+          // card for a commit, dropping focus and flashing it back.
+          onClick={() => setSites(engine.data?.exit_checks?.sites ?? [])}
+          disabled={cfg.saving}
+        >
           Reset
         </button>
       </div>
     </div>
   );
+}
+
+/** The schedule draft: everything in exit_checks but the sites. Sites are the
+ *  Check sites card's to save, and leaving them out of this draft is what keeps
+ *  a schedule save from touching them. Module scope so the seeding effect's
+ *  `seed` dependency is stable across renders. */
+function scheduleDraft(e: Engine): ExitCheckConfig {
+  const { sites: _sites, ...rest } = e.exit_checks ?? {};
+  return rest;
 }
 
 /** The schedule alone. Sites moved out to their own card: a schedule is
@@ -877,12 +928,7 @@ function ScheduleCard({ engine }: { engine: AsyncState<Engine> }) {
   const cfg = useExitCheckConfig(engine);
   const { draft, setDraft, refresh } = useSeededDraft<Engine, ExitCheckConfig>(
     engine.data,
-    (e) => {
-      // Sites are the Check sites card's to save: leaving them out of this
-      // draft is what keeps a schedule save from touching them.
-      const { sites: _sites, ...rest } = e.exit_checks ?? {};
-      return rest;
-    },
+    scheduleDraft,
   );
 
   if (engine.error !== null) {
@@ -962,7 +1008,15 @@ function ScheduleCard({ engine }: { engine: AsyncState<Engine> }) {
         >
           {cfg.saving ? "Saving…" : "Save schedule"}
         </button>
-        <button type="button" onClick={() => setDraft(null)} disabled={cfg.saving}>
+        <button
+          type="button"
+          // Re-seed in place, like the Check sites card: null would unmount the
+          // card for a commit and drop focus with it.
+          onClick={() => {
+            if (engine.data !== undefined) setDraft(scheduleDraft(engine.data));
+          }}
+          disabled={cfg.saving}
+        >
           Reset
         </button>
       </div>
