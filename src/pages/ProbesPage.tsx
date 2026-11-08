@@ -154,6 +154,10 @@ function ProbeRunCard({
   }, [resources.data]);
 
   const run = async () => {
+    // Whatever happens next, the previous round's table is not the answer to
+    // this attempt — clear it before validation can bail out, or a rejected
+    // run would leave the old results reading as this run's.
+    setOutcome(null);
     const spec = buildProbeSpec(form);
     // The engine rejects the whole round for one bad target, so say which one
     // here instead of after a round trip.
@@ -277,7 +281,7 @@ function ProbeRunCard({
           namePlaceholder="X-Token"
           valuePlaceholder="sekret"
           addLabel="Add header"
-          hint="Host, Content-Length and Connection are set by the engine itself."
+          hint="Host, Content-Length, Connection and Accept-Encoding are set by the transport itself."
           onChange={(headers) => patch({ headers })}
         />
 

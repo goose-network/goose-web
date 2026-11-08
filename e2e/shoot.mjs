@@ -19,6 +19,7 @@ const ROUTES = [
   ["chains", "/chains"],
   ["providers", "/providers"],
   ["exit", "/exit-checks"],
+  ["probes", "/probes"],
   ["metrics", "/metrics"],
 ];
 

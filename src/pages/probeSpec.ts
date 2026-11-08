@@ -52,7 +52,16 @@ export type ParseResult =
 
 // Headers the transport derives from the URL or the body itself; pasting them
 // back in would either be ignored or (Content-Length) fight the real body.
-const DERIVED_HEADERS = new Set(["host", "content-length", "connection"]);
+// Accept-Encoding joins them because a caller-set value switches off the
+// transport's transparent decode: the probe would record compressed bytes and
+// every body assertion would fail on mojibake. Letting the transport negotiate
+// keeps the recorded body the text the target actually sent.
+const DERIVED_HEADERS = new Set([
+  "host",
+  "content-length",
+  "connection",
+  "accept-encoding",
+]);
 
 // A request line is "METHOD TARGET [HTTP/x.y]". The version is optional —
 // pastes get trimmed — but see parseRawRequest for what that costs.
@@ -154,7 +163,7 @@ export function parseRawRequest(raw: string): ParseResult {
   const dropped = headers.length - kept.length;
   if (dropped > 0) {
     notes.push(
-      `Dropped ${dropped} header${dropped === 1 ? "" : "s"} the engine sets itself (Host, Content-Length, Connection).`,
+      `Dropped ${dropped} header${dropped === 1 ? "" : "s"} the transport sets itself (Host, Content-Length, Connection, Accept-Encoding).`,
     );
   }
   if (body !== "" && !carriesBody(method)) {
@@ -250,12 +259,15 @@ export function buildProbeSpec(f: ProbeSpecFields): ProbeRunRequest {
  *  case-insensitively and the last row wins, because the engine sets them on
  *  an `http.Header` — "Accept" and "accept" are one header there, so sending
  *  both would leave which value arrives up to Go's map iteration order. The
- *  surviving row keeps the reader's own spelling. */
+ *  surviving row keeps the reader's own spelling. Rows the transport derives
+ *  itself drop out here too: the paste box already refuses them, and a
+ *  hand-typed Accept-Encoding would otherwise switch off transparent decode
+ *  and record a compressed body as mojibake. */
 export function headerMap(headers: Header[]): Record<string, string> {
   const byName = new Map<string, Header>();
   for (const h of headers) {
     const name = h.name.trim();
-    if (name === "") continue;
+    if (name === "" || DERIVED_HEADERS.has(name.toLowerCase())) continue;
     byName.set(name.toLowerCase(), { name, value: h.value });
   }
   return Object.fromEntries([...byName.values()].map((h) => [h.name, h.value]));
@@ -350,8 +362,12 @@ export function checkExpectations(
 
   if (expect.statuses.length > 0) {
     const pass = expect.statuses.includes(res.status);
+    // The verdict renders as a nowrap pill per result row, and a fully
+    // expanded range is 400 codes: label the assertion in the range notation
+    // the field accepts, falling back to a count past what a pill can hold.
+    const written = formatStatuses(expect.statuses);
     out.push({
-      label: `status ${expect.statuses.join("|")}`,
+      label: `status ${written.length <= 32 ? written : `${expect.statuses.length} statuses`}`,
       pass,
       detail: String(res.status),
     });
@@ -417,8 +433,16 @@ export function headerValue(
 export function compile(pattern: string): RegExp | Error {
   const p = pattern.trim();
   if (p === "") return new Error("empty pattern");
-  // A leading and trailing slash is an explicit "this is a regex" signal.
-  const bare = /^\/(.*)\/([a-z]*)$/s.exec(p);
+  // A leading and trailing slash is an explicit "this is a regex" signal — but
+  // only when the inside looks like one (metacharacters) or flags follow it.
+  // `/api/v1/users` and `/dashboard/` are patterns containing slashes, not
+  // delimited regexes: splitting those at the last slash would invent source
+  // and flags the reader never wrote.
+  const delim = /^\/(.*)\/([gimsuy]*)$/s.exec(p);
+  const looksLikeRe =
+    delim !== null &&
+    (delim[2] !== "" || /[\\^$.*+?()[\]{}|]/.test(delim[1]!));
+  const bare = looksLikeRe ? delim : null;
   const source = bare !== null ? bare[1]! : p;
   const flags = bare !== null && bare[2] !== "" ? bare[2]! : "i";
   try {
@@ -435,16 +459,26 @@ function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** Status list from free text: "200", "200,301", "200-299". */
+/** Status list from free text: "200", "200,301", "200-299". A range expands in
+ *  full over the status space — a half-expanded range would assert something
+ *  narrower than what the reader typed — and, like a lone number, codes outside
+ *  100-599 are not statuses and drop out. */
 export function parseStatuses(text: string): number[] {
+  // A range typed with breathing room around the dash — "200 - 299", or an en
+  // dash pasted out of prose — is still one token. Normalise the dash and pull
+  // the spaces in before splitting, or the split cuts the range into two lone
+  // codes and silently asserts only its endpoints.
+  const joined = text
+    .replace(/[‐-―−]/g, "-")
+    .replace(/\s*-\s*/g, "-");
   const out: number[] = [];
-  for (const part of text.split(/[,\s]+/)) {
+  for (const part of joined.split(/[,\s]+/)) {
     if (part === "") continue;
-    const range = /^(\d{3})\s*-\s*(\d{3})$/.exec(part);
+    const range = /^(\d{3})-(\d{3})$/.exec(part);
     if (range !== null) {
-      const lo = Number(range[1]);
-      const hi = Number(range[2]);
-      for (let s = lo; s <= hi && s - lo < 200; s++) out.push(s);
+      const lo = Math.max(Number(range[1]), 100);
+      const hi = Math.min(Number(range[2]), 599);
+      for (let s = lo; s <= hi; s++) out.push(s);
       continue;
     }
     const n = Number(part);
@@ -453,9 +487,18 @@ export function parseStatuses(text: string): number[] {
   return [...new Set(out)].sort((a, b) => a - b);
 }
 
-/** Inverse of parseStatuses, for showing a saved spec's statuses. */
+/** Inverse of parseStatuses: consecutive codes collapse back into the range
+ *  notation the field accepts, so re-saving a spec never spells a range out. */
 export function formatStatuses(statuses: number[]): string {
-  return statuses.join(", ");
+  const runs: Array<[number, number]> = [];
+  for (const s of [...new Set(statuses)].sort((a, b) => a - b)) {
+    const run = runs[runs.length - 1];
+    if (run !== undefined && s === run[1] + 1) run[1] = s;
+    else runs.push([s, s]);
+  }
+  return runs
+    .map(([lo, hi]) => (hi > lo + 1 ? `${lo}-${hi}` : `${lo}${hi === lo + 1 ? `, ${hi}` : ""}`))
+    .join(", ");
 }
 
 /** The assertion fields as the form holds them (statuses still free text). */

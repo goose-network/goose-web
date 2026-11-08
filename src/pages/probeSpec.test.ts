@@ -12,6 +12,7 @@ import {
   compile,
   EMPTY_EXPECT,
   ENGINE_PROBE_DEFAULTS,
+  formatStatuses,
   hasExpectations,
   headerMap,
   headerValue,
@@ -74,20 +75,23 @@ describe("parseRawRequest", () => {
     );
   });
 
-  it("drops the headers the engine derives itself", () => {
+  it("drops the headers the transport derives itself", () => {
     const req = parsed(
       [
         "POST /x HTTP/1.1",
         "Host: example.com",
         "Content-Length: 11",
         "Connection: keep-alive",
+        // A caller-set Accept-Encoding would switch the transport's
+        // transparent decode off and record compressed bytes as the body.
+        "Accept-Encoding: gzip, deflate, br",
         "Accept: */*",
         "",
         "hello world",
       ].join("\n"),
     );
     expect(req.headers).toEqual([{ name: "Accept", value: "*/*" }]);
-    expect(req.notes.join(" ")).toMatch(/Dropped 3 headers/);
+    expect(req.notes.join(" ")).toMatch(/Dropped 4 headers/);
   });
 
   it("skips leading blank lines and comments", () => {
@@ -188,6 +192,45 @@ describe("parseStatuses", () => {
     expect(parseStatuses("200 200 abc 99 600")).toEqual([200]);
     expect(parseStatuses("")).toEqual([]);
   });
+
+  it("expands a wide range in full rather than cutting it", () => {
+    // "Any status answers" is a reasonable thing to type, and a cut range would
+    // assert narrower than what the reader wrote: a silent 200-entry cap made
+    // 404s fail an assertion the reader believed covered them.
+    const all = parseStatuses("200-599");
+    expect(all.length).toBe(400);
+    expect(all[0]).toBe(200);
+    expect(all[399]).toBe(599);
+  });
+
+  it("clamps a range to the status space", () => {
+    expect(parseStatuses("090-101")).toEqual([100, 101]);
+    expect(parseStatuses("598-700")).toEqual([598, 599]);
+    expect(parseStatuses("700-800")).toEqual([]);
+    expect(parseStatuses("300-200")).toEqual([]);
+  });
+
+  it("reads a range typed with space around the dash as one range", () => {
+    // Splitting on whitespace first cut "200 - 299" into two lone codes and
+    // silently asserted only the endpoints — the narrowing this function
+    // exists to prevent, reintroduced by the tokenizer.
+    expect(parseStatuses("200 - 299").length).toBe(100);
+    expect(parseStatuses("200 – 204")).toEqual([200, 201, 202, 203, 204]);
+    expect(parseStatuses("200 - 202, 404")).toEqual([200, 201, 202, 404]);
+  });
+});
+
+describe("formatStatuses", () => {
+  it("collapses consecutive codes back into ranges", () => {
+    expect(formatStatuses(parseStatuses("200-299"))).toBe("200-299");
+    expect(formatStatuses(parseStatuses("200-204 301"))).toBe("200-204, 301");
+  });
+
+  it("leaves pairs and lone codes as a list", () => {
+    expect(formatStatuses([200, 201])).toBe("200, 201");
+    expect(formatStatuses([200, 202])).toBe("200, 202");
+    expect(formatStatuses([])).toBe("");
+  });
 });
 
 describe("compile", () => {
@@ -207,6 +250,16 @@ describe("compile", () => {
     expect(re("^20\\d$").test("200")).toBe(true);
     expect(re("/^abc/").test("abcdef")).toBe(true);
     expect(re("/^abc/i").test("ABCDEF")).toBe(true);
+  });
+
+  it("reads a pattern of slashes as literal slashes, not /re/flags", () => {
+    // Splitting at the last slash turned "/api/v1/users" into source "api/v1"
+    // with flags "users" — a thrown RegExp reported as a failed assertion.
+    expect(re("/api/v1/users").test("GET /api/v1/users 200")).toBe(true);
+    expect(re("/api/v1/users").test("api/v1/users")).toBe(false);
+    // A trailing slash is part of the pattern for the same reason.
+    expect(re("/dashboard/").test("x /dashboard/ y")).toBe(true);
+    expect(re("/dashboard/").test("dashboard")).toBe(false);
   });
 
   it("returns the error instead of throwing on a bad pattern", () => {
@@ -241,6 +294,22 @@ describe("checkExpectations", () => {
   it("reports which status was seen when it does not match", () => {
     const v = checkExpectations({ ...EMPTY_EXPECT, statuses: [404] }, res);
     expect(v).toEqual([{ label: "status 404", pass: false, detail: "200" }]);
+  });
+
+  it("labels a wide status assertion in range notation, not every code", () => {
+    // The verdict renders as a nowrap pill on every result row; 400 joined
+    // codes made the results table one long horizontal scroll.
+    const v = checkExpectations(
+      { ...EMPTY_EXPECT, statuses: parseStatuses("200-599") },
+      res,
+    );
+    expect(v[0]!.label).toBe("status 200-599");
+  });
+
+  it("falls back to a count for a list too long for a pill", () => {
+    const many = Array.from({ length: 40 }, (_, i) => 100 + i * 2);
+    const v = checkExpectations({ ...EMPTY_EXPECT, statuses: many }, res);
+    expect(v[0]!.label).toBe("status 40 statuses");
   });
 
   it("flags an absent header rather than matching the empty string", () => {
@@ -372,6 +441,21 @@ describe("headerMap", () => {
         { name: "X-Token", value: "t" },
       ]),
     ).toEqual({ accept: "*/*", "X-Token": "t" });
+  });
+
+  it("drops the headers the transport derives itself", () => {
+    // A hand-typed Accept-Encoding reaches the engine's Header.Set and switches
+    // off transparent decode, so a brotli answer records as mojibake; the paste
+    // box refuses these rows and the manual editor must not smuggle them in.
+    expect(
+      headerMap([
+        { name: "Host", value: "example.com" },
+        { name: "content-length", value: "11" },
+        { name: "Connection", value: "keep-alive" },
+        { name: "Accept-Encoding", value: "gzip, deflate, br" },
+        { name: "Accept", value: "*/*" },
+      ]),
+    ).toEqual({ Accept: "*/*" });
   });
 });
 

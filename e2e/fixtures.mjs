@@ -1,7 +1,7 @@
 // e2e/fixtures.mjs — deterministic sample data for visual review.
 //
 // The engine records metrics only when its metrics DB is writable, which is
-// not guaranteed on a dev box. Screenshots stub the three read-only observation
+// not guaranteed on a dev box. Screenshots stub the read-only observation
 // endpoints so the dashboard, exit-IP and probe tables always render with
 // realistic rows; CRUD pages keep talking to the real engine.
 
@@ -69,6 +69,42 @@ function exitChecks() {
   return out;
 }
 
+/** Probe history rows, shaped like core.HTTPProbe on the wire. */
+function probes() {
+  const routes = ["direct", "outbound:local-proxy", "pool:local"];
+  const targets = ["https://ifconfig.me/ip", "https://api.example.com/v1/login"];
+  const now = Date.now();
+  const out = [];
+  let k = 0;
+  for (let round = 0; round < 4; round++) {
+    for (const route of routes) {
+      const target = targets[k % targets.length];
+      const failed = route === "outbound:local-proxy" && round === 1;
+      const status = failed ? 0 : k % 3 === 2 ? 404 : 200;
+      const latency = Math.round((9 + (k * 53) % 900) * 1e6);
+      out.push({
+        id: `hp-${k}`,
+        route,
+        target,
+        method: target.endsWith("/login") ? "POST" : "GET",
+        status,
+        headers:
+          status === 0
+            ? undefined
+            : { "Content-Type": "application/json", "X-Echo": "yes" },
+        body: failed ? "" : `{"hello": "world", "n": ${k}}`,
+        truncated: false,
+        success: !failed,
+        error: failed ? "proxy refused connection" : "",
+        latency,
+        startedAt: new Date(now - round * 15 * MIN).toISOString(),
+      });
+      k++;
+    }
+  }
+  return out;
+}
+
 /** Install the stubs on a Playwright page. */
 export async function stubObservability(page) {
   const json = (body) => ({
@@ -79,4 +115,5 @@ export async function stubObservability(page) {
   await page.route("**/api/metrics**", (r) => r.fulfill(json(metrics())));
   await page.route("**/api/exit-checks?**", (r) => r.fulfill(json(exitChecks())));
   await page.route("**/api/exit-checks", (r) => r.fulfill(json(exitChecks())));
+  await page.route("**/api/probes/results**", (r) => r.fulfill(json(probes())));
 }
