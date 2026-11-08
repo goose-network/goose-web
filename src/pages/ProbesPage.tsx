@@ -29,6 +29,7 @@ import {
   TextField,
 } from "../components/fields";
 import { StringList } from "../components/StringList";
+import { ChipPicker } from "../components/ChipPicker";
 import { formatDuration, formatTime } from "../format";
 import { httpUrl } from "../validate";
 import {
@@ -356,8 +357,8 @@ function TargetPresets({
   );
 }
 
-/** Route references to probe through. Nothing selected is a real choice —
- *  "every built outbound" — not an empty form, so it gets its own chip. */
+/** Route references to probe through. The nothing-selected choice — "every
+ *  built outbound" — is the shared picker's own chip. */
 function RoutePicker({
   choices,
   selected,
@@ -371,39 +372,19 @@ function RoutePicker({
   loading: boolean;
   error: string | null;
 }) {
-  const toggle = (ref: string) =>
-    onChange(
-      selected.includes(ref)
-        ? selected.filter((r) => r !== ref)
-        : [...selected, ref],
-    );
-
   return (
     <FieldGroup
       id="probe-routes"
       label="Routes"
       hint="A pool or chain is probed through its own selection path — the same one dispatch uses."
     >
-      <div className="chip-grid">
-        <label className={`chip${selected.length === 0 ? " on" : ""}`}>
-          <input
-            type="checkbox"
-            checked={selected.length === 0}
-            onChange={() => onChange([])}
-          />
-          every outbound
-        </label>
-        {choices.map((ref) => (
-          <label key={ref} className={`chip${selected.includes(ref) ? " on" : ""}`}>
-            <input
-              type="checkbox"
-              checked={selected.includes(ref)}
-              onChange={() => toggle(ref)}
-            />
-            <span className="mono">{ref}</span>
-          </label>
-        ))}
-      </div>
+      <ChipPicker
+        id="probe-routes"
+        allLabel="every outbound"
+        choices={choices}
+        selected={selected}
+        onChange={onChange}
+      />
       {error !== null ? (
         // The three lists arrive as one Promise.all, so a single endpoint the
         // engine lacks empties every group — and "direct is the only route"

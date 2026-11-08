@@ -1,11 +1,15 @@
 // src/components/SearchInput.tsx — client-side filter box for long tables.
 
+import type { Ref } from "react";
+
 export interface SearchInputProps {
   id: string;
   value: string;
   onChange: (v: string) => void;
   placeholder?: string | undefined;
   label?: string | undefined;
+  /** For callers whose list can drop the focused element out of the DOM. */
+  inputRef?: Ref<HTMLInputElement> | undefined;
 }
 
 export function SearchInput({
@@ -14,6 +18,7 @@ export function SearchInput({
   onChange,
   placeholder = "Filter…",
   label = "Filter",
+  inputRef,
 }: SearchInputProps) {
   return (
     <div className="search-wrap">
@@ -22,6 +27,7 @@ export function SearchInput({
         <path d="M10.5 10.5 14 14" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
       </svg>
       <input
+        ref={inputRef}
         id={id}
         type="search"
         value={value}

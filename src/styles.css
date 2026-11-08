@@ -1041,6 +1041,13 @@ button:disabled {
   margin-bottom: 4px;
 }
 
+/* A live fleet has hundreds of outbounds; unbounded, the picker's grid would
+   dwarf the card around it, so long lists scroll in a bounded box. */
+.chip-scroll {
+  max-height: 12rem;
+  overflow-y: auto;
+}
+
 .chip {
   display: inline-flex;
   align-items: center;

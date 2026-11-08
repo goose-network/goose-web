@@ -25,6 +25,7 @@ import {
   TextField,
 } from "../components/fields";
 import { StringList } from "../components/StringList";
+import { ChipPicker } from "../components/ChipPicker";
 import { formatDuration, formatTime } from "../format";
 import {
   buildExitRunSpec,
@@ -511,30 +512,13 @@ function SingleRunCard({
         label="Outbounds"
         hint="Nothing selected checks every outbound that has a server address."
       >
-        <div className="chip-grid">
-          <label className={`chip${only.length === 0 ? " on" : ""}`}>
-            <input
-              type="checkbox"
-              checked={only.length === 0}
-              onChange={() => setOnly([])}
-            />
-            every outbound
-          </label>
-          {ids.map((id) => (
-            <label key={id} className={`chip${only.includes(id) ? " on" : ""}`}>
-              <input
-                type="checkbox"
-                checked={only.includes(id)}
-                onChange={() =>
-                  setOnly((v) =>
-                    v.includes(id) ? v.filter((x) => x !== id) : [...v, id],
-                  )
-                }
-              />
-              <span className="mono">{id}</span>
-            </label>
-          ))}
-        </div>
+        <ChipPicker
+          id="run-outbounds"
+          allLabel="every outbound"
+          choices={ids}
+          selected={only}
+          onChange={setOnly}
+        />
         {ids.length === 0 && !outbounds.loading && outbounds.error === null && (
           <div className="field-hint">
             No outbounds are configured yet — add one on the Outbounds page first.
