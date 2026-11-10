@@ -39,14 +39,17 @@ import {
   carriesBody,
   checkExpectations,
   ENGINE_PROBE_DEFAULTS,
+  failureLabel,
   formatStatuses,
   hasExpectations,
   HTTP_METHODS,
   orDefault,
   parseRawRequest,
   parseStatuses,
+  phaseLeg,
   probeResponse,
   PROBE_TARGET_PRESETS,
+  REASON_LABELS,
   type ExpectationFields,
   type Expectations,
   type Header,
@@ -654,14 +657,20 @@ function Verdicts({ verdicts }: { verdicts: Verdict[] }) {
 }
 
 /** The response itself, folded away until asked for: bodies are up to a
- *  megabyte and a table of them would bury the verdicts. */
+ *  megabyte and a table of them would bury the verdicts. What is always worth
+ *  showing, though, is *where* the request got to: the first-hop address the
+ *  engine dialed, the outbound that served it, the per-phase timings, and on
+ *  a failure the leg it broke on — local→proxy or proxy→target. */
 function ResponseDetail({ probe }: { probe: HTTPProbe }) {
   const body = probe.body ?? "";
   const error = probe.error ?? "";
   const headers = probe.headers ?? {};
   const names = Object.keys(headers);
+  const timings = phaseTimingRows(probe);
+  const leg = phaseLeg(probe.phase, probe.route);
+  const dialed = probe.dialAddr ?? "";
 
-  if (body === "" && error === "" && names.length === 0) {
+  if (body === "" && error === "" && names.length === 0 && timings.length === 0 && dialed === "") {
     return <span className="hint">empty</span>;
   }
 
@@ -674,7 +683,38 @@ function ResponseDetail({ probe }: { probe: HTTPProbe }) {
               probe.truncated === true ? " (truncated)" : ""
             }`}
       </summary>
-      {error !== "" && <div className="status-bad probe-error">{error}</div>}
+      {error !== "" && (
+        <div className="status-bad probe-error">
+          {/* The classified failure first — which leg broke, and how — with
+              the engine's raw error under it as the full diagnostic. */}
+          <div>
+            <strong>{failureLabel(probe.phase, probe.reason)}</strong>
+            {leg !== undefined && <span className="hint"> — broke on the {leg} leg</span>}
+          </div>
+          <div>{error}</div>
+        </div>
+      )}
+      {(dialed !== "" || timings.length > 0) && (
+        <dl className="def-grid">
+          {dialed !== "" && (
+            <div>
+              <dt>Dialed</dt>
+              <dd className="mono">
+                {dialed}
+                {probe.dialVia !== undefined && probe.dialVia !== "" && (
+                  <span className="hint"> via {probe.dialVia}</span>
+                )}
+              </dd>
+            </div>
+          )}
+          {timings.map(([label, ns]) => (
+            <div key={label}>
+              <dt>{label}</dt>
+              <dd>{formatDuration(ns)}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
       {names.length > 0 && (
         <pre className="probe-body mono">
           {names.map((n) => `${n}: ${headers[n] ?? ""}`).join("\n")}
@@ -683,6 +723,20 @@ function ResponseDetail({ probe }: { probe: HTTPProbe }) {
       {body !== "" && <pre className="probe-body mono">{body}</pre>}
     </details>
   );
+}
+
+/** The engine's per-phase durations in path order, dropping the phases that
+ *  did not run or were not observable (an omitted or zero duration — under
+ *  gvisor only the route dial is ever present). */
+function phaseTimingRows(p: HTTPProbe): Array<[string, number]> {
+  const rows: Array<[string, number | undefined]> = [
+    ["route dial", p.routeDial],
+    ["DNS", p.dns],
+    ["connect", p.connect],
+    ["TLS", p.tls],
+    ["first byte", p.ttfb],
+  ];
+  return rows.filter((r): r is [string, number] => r[1] !== undefined && r[1] > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -879,17 +933,19 @@ function ProbeHistoryCard({ ranAt }: { ranAt: number }) {
   const { goose } = useSdk();
   const [rows, setRows] = useState(200);
   const [route, setRoute] = useState("");
+  const [reason, setReason] = useState("");
   // Fetched unfiltered and narrowed here: the route dropdown is built from what
   // came back, so asking the engine for one route would leave the dropdown
   // offering nothing but the route already chosen — the reader could not get
-  // back to any other one without first resetting.
+  // back to any other one without first resetting. The reason filter works the
+  // same way, over the slugs present in the rows.
   const history = useAsync(() => listProbeResults(goose, { n: rows }), [
     goose,
     rows,
     ranAt,
   ]);
   const [limit, setLimit] = useState(PAGE);
-  useEffect(() => setLimit(PAGE), [route, rows, ranAt]);
+  useEffect(() => setLimit(PAGE), [route, reason, rows, ranAt]);
 
   const items = history.data ?? [];
   const routeChoices = useMemo(
@@ -897,9 +953,19 @@ function ProbeHistoryCard({ ranAt }: { ranAt: number }) {
       [...new Set(items.map((p) => p.route ?? "").filter((r) => r !== ""))].sort(),
     [items],
   );
+  const reasonChoices = useMemo(
+    () =>
+      [...new Set(items.map((p) => p.reason ?? "").filter((r) => r !== ""))].sort(),
+    [items],
+  );
   const matched = useMemo(
-    () => (route === "" ? items : items.filter((p) => (p.route ?? "") === route)),
-    [items, route],
+    () =>
+      items.filter(
+        (p) =>
+          (route === "" || (p.route ?? "") === route) &&
+          (reason === "" || (p.reason ?? "") === reason),
+      ),
+    [items, route, reason],
   );
   const visible = matched.slice(0, limit);
 
@@ -922,6 +988,26 @@ function ProbeHistoryCard({ ranAt }: { ranAt: number }) {
         ),
     },
     {
+      // The engine's own attribution: what kind of failure this was, with the
+      // leg it broke on and the raw error in the tooltip. "—" on a success and
+      // on rows an older engine recorded before classification existed.
+      key: "failure",
+      header: "Failure",
+      className: "nowrap",
+      render: (p) => {
+        if (p.success === true || (p.error ?? "") === "") return "—";
+        const leg = phaseLeg(p.phase, p.route);
+        const title = [leg !== undefined ? `broke on the ${leg} leg` : "", p.error ?? ""]
+          .filter((s) => s !== "")
+          .join(" — ");
+        return (
+          <span className="pill fail" title={title}>
+            {failureLabel(p.phase, p.reason)}
+          </span>
+        );
+      },
+    },
+    {
       key: "latency",
       header: "Latency",
       className: "num",
@@ -937,6 +1023,14 @@ function ProbeHistoryCard({ ranAt }: { ranAt: number }) {
           : `${byteLength(p.body)}${p.truncated === true ? "+ (cut)" : ""}`,
     },
   ];
+
+  const filtered = route !== "" || reason !== "";
+  const noMatchTitle =
+    route !== "" && reason !== ""
+      ? `No probes recorded for “${route}” that failed with “${REASON_LABELS[reason] ?? reason}”`
+      : route !== ""
+        ? `No probes recorded for “${route}”`
+        : `No recorded probe failed with “${REASON_LABELS[reason] ?? reason}”`;
 
   return (
     <div className="card">
@@ -957,6 +1051,17 @@ function ProbeHistoryCard({ ranAt }: { ranAt: number }) {
           onChange={setRoute}
         />
         <SelectField
+          id="probe-history-reason"
+          label="Failure"
+          value={reason}
+          emptyOption="All outcomes"
+          options={reasonChoices.map((r) => ({
+            value: r,
+            label: REASON_LABELS[r] ?? r,
+          }))}
+          onChange={setReason}
+        />
+        <SelectField
           id="probe-history-rows"
           label="History depth"
           value={String(rows)}
@@ -973,13 +1078,20 @@ function ProbeHistoryCard({ ranAt }: { ranAt: number }) {
         error={history.error}
         onRetry={history.reload}
         empty={
-          items.length > 0 ? (
+          items.length > 0 && filtered ? (
             <EmptyState
-              title={`No probes recorded for “${route}”`}
+              title={noMatchTitle}
               hint="The history depth above may not reach back far enough."
               action={
-                <button type="button" className="ghost" onClick={() => setRoute("")}>
-                  Show all routes
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => {
+                    setRoute("");
+                    setReason("");
+                  }}
+                >
+                  Clear filters
                 </button>
               }
             />

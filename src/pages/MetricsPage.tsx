@@ -19,8 +19,19 @@ import { Notice } from "../components/Notice";
 import { SelectField } from "../components/fields";
 import { SearchInput, matches } from "../components/SearchInput";
 import { compact, formatDuration, formatTime } from "../format";
-import type { RequestMetric } from "@goose-network/goose-sdk";
+import type { RequestMetric as SdkRequestMetric } from "@goose-network/goose-sdk";
+import { REASON_LABELS } from "./probeSpec";
 import "../charts/charts.css";
+
+/** The pinned SDK's generated `RequestMetric` predates the engine's failure
+ *  classification, so the wire type is widened here — the same pattern
+ *  runApi.ts uses for the probe fields. `reason` is a stable slug on failed
+ *  rows (`dns_timeout`, `connect_refused`, `proxy_timeout`, ... — the same
+ *  vocabulary probe results carry); rows from an older engine, and rows the
+ *  engine could not classify, have none. */
+export interface RequestMetric extends SdkRequestMetric {
+  reason?: string;
+}
 
 // Time buckets offered to the reader, newest window default. `short` names
 // the previous window in KPI deltas ("+12% vs previous 15 min").
@@ -59,7 +70,10 @@ function MetricsCard() {
     [goose, rows],
   );
 
-  const metrics = data ?? [];
+  // The SDK's return type is the pre-classification shape; widening here is
+  // sound because the only member added is optional and the engine sends it on
+  // failed rows whenever it can classify them.
+  const metrics: RequestMetric[] = data ?? [];
   const now = Date.now();
   const win = WINDOWS[windowIdx] ?? WINDOWS[0]!;
   const windowMs = win.ms;
@@ -93,7 +107,12 @@ function MetricsCard() {
     () =>
       scoped.filter((m) =>
         matches(
-          `${m.inboundID ?? ""} ${m.user ?? ""} ${m.target ?? ""} ${(m.chain ?? []).join(" ")} ${m.error ?? ""}`,
+          // The reason's display label joins the haystack on failed rows —
+          // exactly what the Status pill shows ("no usable outbound"), and
+          // unlike the chain ids it appears nowhere in the raw fields.
+          // Gated on success the same way the pill is, so "failed" never
+          // leaks into a successful row's searchable text.
+          `${m.inboundID ?? ""} ${m.user ?? ""} ${m.target ?? ""} ${(m.chain ?? []).join(" ")} ${m.error ?? ""} ${m.reason ?? ""} ${m.success === true ? "" : failurePill(m.reason)}`,
           query,
         ),
       ),
@@ -141,7 +160,7 @@ function MetricsCard() {
           <span className="pill ok">ok</span>
         ) : (
           <span className="pill fail" title={m.error ?? ""}>
-            failed
+            {failurePill(m.reason)}
           </span>
         ),
     },
@@ -339,6 +358,15 @@ function MetricsCard() {
 /** Wall-clock ms for a metric (finished when known, else started). */
 function stamp(m: RequestMetric): number {
   return new Date(m.finishedAt ?? m.startedAt ?? 0).getTime();
+}
+
+/** Pill text for a failed row: the reason slug's reader-facing words when the
+ *  engine classified it, else the old bare "failed" — rows recorded before
+ *  classification existed have no reason, and "unknown" says no more than
+ *  "failed" does. The raw error stays in the pill's tooltip. */
+function failurePill(reason: string | undefined): string {
+  if (reason === undefined || reason === "" || reason === "unknown") return "failed";
+  return REASON_LABELS[reason] ?? reason.replace(/_/g, " ");
 }
 
 interface Stats {

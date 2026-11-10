@@ -36,6 +36,36 @@ export interface HTTPProbe {
   truncated?: boolean;
   success?: boolean;
   error?: string;
+  /** the leg a failure broke on: "dns"/"connect" are local→proxy (local→target
+   *  on a direct route), "proxy" is the proxy's handshake after its TCP port
+   *  was reached, "tls"/"headers"/"body" are beyond it on the proxy→target
+   *  leg, "request" is a malformed spec. Empty on success and on older
+   *  engines. */
+  phase?: string;
+  /** stable slug classifying the failure (`dns_timeout`, `connect_refused`,
+   *  `proxy_timeout`, `body_timeout`, `tls_cert`, ... — the same slug lands on
+   *  the probe's metrics row). Empty on success and on older engines. */
+  reason?: string;
+  /** address the first hop actually connected to — the proxy server for a
+   *  proxy route, the target for a direct one. Absent when the dial was not
+   *  observable (a stack that bypasses `net.Dialer`, an in-memory tunnel). */
+  dialAddr?: string;
+  /** the outbound that served the route's dial: a pool or chain route names
+   *  the member picked at dial time, an `outbound:<id>` route repeats the id.
+   *  Empty for a direct route. */
+  dialVia?: string;
+  /** Per-phase durations in Go time.Duration nanoseconds, measured from the
+   *  request start; absent when a phase did not run or was not observable.
+   *  `routeDial` spans the whole route dial (local→proxy connect plus the
+   *  proxy's handshake toward the target) and is the one timing every stack
+   *  provides; `dns`/`connect` break out the first hop's resolution and TCP
+   *  connect where the trace hooks fire; `tls` is the handshake with the
+   *  target; `ttfb` is when the first response byte arrived. */
+  routeDial?: number;
+  dns?: number;
+  connect?: number;
+  tls?: number;
+  ttfb?: number;
   /** Go time.Duration — nanoseconds, like every other duration on the wire */
   latency?: number;
   startedAt?: string;

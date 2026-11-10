@@ -5,22 +5,51 @@
 // with nothing but an IP address: the engine reads at most 64 bytes and runs
 // them through net.ParseIP, so a JSON endpoint or an HTML "what is my IP"
 // page fails every check with "is not an IP" and reads like a broken proxy.
-// And an empty site list is meaningful — the engine falls back to its own
-// defaults — so the request builder drops it rather than sending `[]`.
+// And the two empty lists mean different things. In a *run* request an empty
+// site list is "use the configured sites", so the request builder drops it
+// rather than sending `[]`. In the *saved config*, null means "follow the
+// engine's built-in defaults" while an explicit `[]` means every site was
+// deleted — the page seeds the defaults into the editor so they can be, and
+// saving the emptied list switches the checks off.
 
 import type { ExitRunSpec } from "../runApi";
 import { cleanList, httpUrl } from "../validate";
 
 /** The engine's built-in defaults (`internal/exitip.defaultSites`), used when
- *  no site is configured. Kept as its own list so the "empty uses the
- *  engine's defaults" hint stays checkable: checkSites.test.ts asserts every
- *  one of these is offered in the picker. */
+ *  no site is configured — and seeded into the page's editors when the config
+ *  has none, which is what makes the built-ins deletable on the web. Kept as
+ *  its own list so the "these are the engine's defaults" story stays
+ *  checkable: checkSites.test.ts asserts every one of these is offered in the
+ *  picker. */
 export const ENGINE_DEFAULT_SITES = [
   "https://ifconfig.me",
   "https://api.ipify.org",
   "https://checkip.amazonaws.com",
   "https://ipinfo.io/ip",
 ] as const;
+
+/** The saved site list, or undefined when the engine has none saved. The
+ *  engine marshals an unset list as JSON `null` and an emptied one as `[]`,
+ *  and the two are different states — "follow the built-in defaults" versus
+ *  "every site was deleted, checks off" — so neither may collapse into the
+ *  other on the way into an editor. */
+export function savedSiteList(
+  cfgSites: string[] | null | undefined,
+): string[] | undefined {
+  return Array.isArray(cfgSites) ? cfgSites : undefined;
+}
+
+/** What a site editor starts from: the saved list when the engine has one —
+ *  an explicitly emptied list included, because that is its own state (every
+ *  site deleted, checks off) and must not grow the defaults back — and the
+ *  engine's built-in defaults otherwise, seeded as ordinary rows so they can
+ *  be deleted on the web. Every editor on the Exit IP page seeds through
+ *  this one function so the three call sites cannot drift apart. */
+export function editorSeedSites(
+  cfgSites: string[] | null | undefined,
+): string[] {
+  return savedSiteList(cfgSites) ?? [...ENGINE_DEFAULT_SITES];
+}
 
 /** What the engine falls back to when `exit_checks` leaves a number at 0
  *  (`config.ExitCheckConfig.EffectiveTimeoutSec` / `EffectiveConcurrency`).

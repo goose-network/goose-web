@@ -31,10 +31,12 @@ import {
   buildExitRunSpec,
   CHECK_SITE_PRESETS,
   effectiveNumber,
+  editorSeedSites,
   ENGINE_DEFAULT_CONCURRENCY,
   ENGINE_DEFAULT_SITES,
   ENGINE_DEFAULT_TIMEOUT_SEC,
   firstBadSite,
+  savedSiteList,
 } from "./checkSites";
 import { runExitChecksNow, stillRunning } from "../runApi";
 import { cleanList } from "../validate";
@@ -261,7 +263,12 @@ function SingleRunCard({
   const cfg = useExitCheckConfig(engine);
   const outbounds = useAsync(() => goose.listOutbounds(), [goose]);
 
-  const saved = engine.data?.exit_checks?.sites ?? [];
+  // The saved list as the editors see it: no list saved (JSON null) seeds the
+  // engine's built-in defaults so they are ordinary deletable rows, while an
+  // explicit empty list is a state of its own — every site deleted, checks
+  // off — and must seed empty rather than grow the defaults back.
+  const savedSites = savedSiteList(engine.data?.exit_checks?.sites);
+  const saved = editorSeedSites(engine.data?.exit_checks?.sites);
   const [sites, setSites] = useState<string[]>([]);
   const [touched, setTouched] = useState(false);
   const [only, setOnly] = useState<string[]>([]);
@@ -285,7 +292,9 @@ function SingleRunCard({
     if (engine.data === undefined) return;
     const fresh = seededFrom.current !== engine.data;
     seededFrom.current = engine.data;
-    if (fresh && !touched) setSites(engine.data.exit_checks?.sites ?? []);
+    if (fresh && !touched) {
+      setSites(editorSeedSites(engine.data.exit_checks?.sites));
+    }
   }, [engine.data, touched]);
 
   // Polling timers for a detached round. `alive` and `runSeq` fence the chain:
@@ -426,7 +435,11 @@ function SingleRunCard({
         <h2>Run a check now</h2>
         <div className="spacer" />
         <span className="pill">
-          {sites.length === 0 ? "engine's sites" : `${sites.length} site${sites.length === 1 ? "" : "s"}`}
+          {sites.length === 0
+            ? savedSites?.length === 0
+              ? "no sites — checks off"
+              : "engine's sites"
+            : `${sites.length} site${sites.length === 1 ? "" : "s"}`}
         </span>
         <span className="pill">
           {only.length === 0
@@ -460,7 +473,7 @@ function SingleRunCard({
         values={sites}
         placeholder="https://ifconfig.me"
         addLabel="Add site"
-        hint="Empty uses the saved list below, or the engine's built-in defaults when that is empty too. Each outbound is checked against one site, rotating round-robin."
+        hint="Empty uses the saved list below — or the engine's built-in defaults when no list is saved. Each outbound is checked against one site, rotating round-robin."
         onChange={editSites}
       />
       <SitePresets
@@ -560,7 +573,9 @@ function SingleRunCard({
             badSite !== undefined
               ? "Fix the check site first — the engine needs an absolute http(s) URL"
               : dirty
-                ? "Save this run's site list as the list every run and schedule uses"
+                ? cleanList(sites).length === 0
+                  ? "Save an empty list — this switches exit-IP checks off"
+                  : "Save this run's site list as the list every run and schedule uses"
                 : "Same as the saved list"
           }
         >
@@ -672,7 +687,7 @@ function RunResults({ checks }: { checks: ExitCheck[] }) {
         empty={
           <EmptyState
             title="No checks ran"
-            hint="Every outbound was skipped — none has a server address to dial through."
+            hint="Either no check site is left to ask — every one was deleted — or every outbound was skipped for lack of a server address to dial through."
           />
         }
       />
@@ -821,15 +836,28 @@ function CheckSitesCard({
   const cfg = useExitCheckConfig(engine);
   // refreshKey is the run card's "I just saved this list" signal. Without it
   // this draft keeps showing the previous list, and pressing Save here would
-  // put that straight back over the change just made.
+  // put that straight back over the change just made. When the engine has no
+  // saved list at all (JSON null), the editor seeds with the built-in
+  // defaults — visible, deletable rows rather than an empty box standing in
+  // for a list the reader cannot see.
   const { draft: sites, setDraft: setSites, refresh } = useSeededDraft<
     Engine,
     string[]
-  >(engine.data, (e) => e.exit_checks?.sites ?? [], refreshKey);
+  >(
+    engine.data,
+    (e) => editorSeedSites(e.exit_checks?.sites),
+    refreshKey,
+  );
 
   if (sites === null) return null;
 
   const badSite = firstBadSite(sites);
+  const savedSites = savedSiteList(engine.data?.exit_checks?.sites);
+  // No saved list: what the editor shows is the engine's defaults, not
+  // anything stored yet. A saved empty list: every site was deleted and the
+  // checks are off until a list is saved again.
+  const showingDefaults = savedSites === undefined;
+  const checksOff = savedSites !== undefined && savedSites.length === 0;
 
   return (
     <div className="card">
@@ -839,8 +867,14 @@ function CheckSitesCard({
         not name their own. Each must answer with nothing but an IP address — the engine reads at
         most 64 bytes of the response and parses it, so a JSON or HTML answer fails the check.
         Batches rotate round-robin across the list so a large test spreads its load instead of
-        hammering one site.
+        hammering one site. Saving stores exactly the list shown here — including the built-in
+        defaults once you have deleted the ones you do not want.
       </p>
+      {checksOff && (
+        <Notice kind="info">
+          Exit-IP checks are off — every site was deleted. Add one and save to turn them back on.
+        </Notice>
+      )}
       <StringList
         id="exit-sites"
         label="Sites"
@@ -848,7 +882,11 @@ function CheckSitesCard({
         values={sites}
         placeholder="https://ifconfig.me"
         addLabel="Add site"
-        hint={`Empty uses the engine's built-in defaults: ${ENGINE_DEFAULT_SITES.join(", ")}.`}
+        hint={
+          showingDefaults
+            ? "No list is saved yet — these are the engine's built-in defaults, loaded here so you can delete what you do not want."
+            : `Delete every site and save to switch exit-IP checks off; the engine's built-in defaults (${ENGINE_DEFAULT_SITES.join(", ")}) return only when the saved list is dropped from the config entirely.`
+        }
         onChange={setSites}
       />
       <SitePresets
@@ -880,6 +918,11 @@ function CheckSitesCard({
               })
           }
           disabled={cfg.saving || badSite !== undefined}
+          title={
+            cleanList(sites).length === 0
+              ? "Save an empty list — this switches exit-IP checks off"
+              : undefined
+          }
         >
           {cfg.saving ? "Saving…" : "Save sites"}
         </button>
@@ -887,7 +930,9 @@ function CheckSitesCard({
           type="button"
           // Re-seed in place: setting the draft to null would unmount this whole
           // card for a commit, dropping focus and flashing it back.
-          onClick={() => setSites(engine.data?.exit_checks?.sites ?? [])}
+          onClick={() =>
+            setSites(editorSeedSites(engine.data?.exit_checks?.sites))
+          }
           disabled={cfg.saving}
         >
           Reset

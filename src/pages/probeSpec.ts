@@ -340,6 +340,103 @@ export interface ProbeResponse {
   /** the engine cut the body at its cap, so a pattern that is absent from
    *  what arrived may have been in the part that was dropped */
   truncated?: boolean | undefined;
+  /** the leg a failure broke on, and its classified reason slug — the
+   *  engine's own attribution (`core.HTTPProbe.Phase`/`Reason`), absent on
+   *  older engines */
+  phase?: string | undefined;
+  reason?: string | undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Failure labels: the engine classifies, the browser words it
+// ---------------------------------------------------------------------------
+
+/** Reader-facing words for each failure phase the engine reports
+ *  (`core.HTTPProbe.Phase`). */
+export const PHASE_LABELS: Record<string, string> = {
+  request: "the request itself",
+  dns: "DNS lookup",
+  connect: "TCP connect",
+  proxy: "proxy handshake",
+  tls: "TLS handshake",
+  headers: "response headers",
+  body: "response body",
+};
+
+/** Reader-facing words for each reason slug the engine classifies
+ *  (`core.HTTPProbe.Reason`). "unknown" is deliberately absent: it carries no
+ *  information, so the phase speaks instead. */
+export const REASON_LABELS: Record<string, string> = {
+  dns_timeout: "DNS timed out",
+  dns_nxdomain: "no such host",
+  dns_failure: "DNS failed",
+  connect_refused: "connection refused",
+  connect_timeout: "connect timed out",
+  connect_unreachable: "network unreachable",
+  route_invalid: "route does not exist",
+  route_unavailable: "no usable outbound",
+  proxy_auth: "proxy auth failed",
+  proxy_rejected: "proxy rejected the request",
+  proxy_timeout: "proxy handshake timed out",
+  tunnel_unavailable: "no live tunnel",
+  tls_handshake: "TLS handshake failed",
+  tls_cert: "bad TLS certificate",
+  tls_timeout: "TLS timed out",
+  header_timeout: "no response headers in time",
+  body_timeout: "body read timed out",
+  timeout: "timed out",
+  reset_eof: "connection reset or closed",
+  decode_error: "response decode failed",
+  canceled: "canceled",
+  round_budget: "round ended before it ran",
+  bad_request: "request could not be built",
+};
+
+/**
+ * failureLabel words a classified failure compactly, for a verdict pill: the
+ * reason's phrase when the slug is known, a slug from a newer engine
+ * humanized, else the phase, else the old bare "request failed". The raw
+ * error string stays in the verdict's detail — the label says *what kind* of
+ * failure, the error keeps the full diagnostic.
+ */
+export function failureLabel(phase?: string, reason?: string): string {
+  if (reason !== undefined && reason !== "" && reason !== "unknown") {
+    return REASON_LABELS[reason] ?? reason.replace(/_/g, " ");
+  }
+  if (phase !== undefined && phase !== "") {
+    return `${PHASE_LABELS[phase] ?? phase} failed`;
+  }
+  return "request failed";
+}
+
+/**
+ * phaseLeg translates a failure phase into the leg of the route it broke on —
+ * the attribution the whole classification exists for. "dns" and "connect"
+ * are the dial toward the first hop: the proxy server on a proxy route, the
+ * target itself on a direct one. "tls", "headers" and "body" are beyond the
+ * proxy, on its way to the target. Undefined for an empty or unknown phase.
+ */
+export function phaseLeg(
+  phase: string | undefined,
+  route: string | undefined,
+): string | undefined {
+  if (phase === undefined || phase === "") return undefined;
+  const direct = route === undefined || route === "" || route === "direct";
+  switch (phase) {
+    case "request":
+      return "before dialing";
+    case "dns":
+    case "connect":
+      return direct ? "local → target" : "local → proxy";
+    case "proxy":
+      return "at the proxy";
+    case "tls":
+    case "headers":
+    case "body":
+      return direct ? "local → target" : "proxy → target";
+    default:
+      return undefined;
+  }
 }
 
 /**
@@ -355,7 +452,13 @@ export function checkExpectations(
   res: ProbeResponse,
 ): Verdict[] {
   if (res.error !== undefined && res.error !== "") {
-    return [{ label: "request", pass: false, detail: res.error }];
+    return [
+      {
+        label: failureLabel(res.phase, res.reason),
+        pass: false,
+        detail: res.error,
+      },
+    ];
   }
 
   const out: Verdict[] = [];
@@ -531,13 +634,17 @@ export function hasExpectations(e: Expectations): boolean {
 
 /** Adapts a recorded probe to what the assertion evaluator takes: the engine's
  *  empty error string means "no error", and an omitted header map (Go's
- *  `omitempty`) means no headers were recorded. */
+ *  `omitempty`) means no headers were recorded. The failure classification
+ *  rides along — `omitempty` on the engine side, so an older engine's rows
+ *  arrive without it and the verdict falls back to the bare error. */
 export function probeResponse(p: {
   status?: number;
   headers?: Record<string, string>;
   body?: string;
   error?: string;
   truncated?: boolean;
+  phase?: string;
+  reason?: string;
 }): ProbeResponse {
   const error = p.error ?? "";
   return {
@@ -546,5 +653,7 @@ export function probeResponse(p: {
     body: p.body ?? "",
     error: error === "" ? undefined : error,
     truncated: p.truncated === true ? true : undefined,
+    phase: p.phase,
+    reason: p.reason,
   };
 }

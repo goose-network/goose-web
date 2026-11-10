@@ -12,6 +12,7 @@ import {
   compile,
   EMPTY_EXPECT,
   ENGINE_PROBE_DEFAULTS,
+  failureLabel,
   formatStatuses,
   hasExpectations,
   headerMap,
@@ -19,6 +20,7 @@ import {
   orDefault,
   parseRawRequest,
   parseStatuses,
+  phaseLeg,
   probeResponse,
   PROBE_TARGET_PRESETS,
   type ProbeSpecFields,
@@ -328,7 +330,27 @@ describe("checkExpectations", () => {
       body: "",
       error: "dial tcp: i/o timeout",
     });
-    expect(v).toEqual([{ label: "request", pass: false, detail: "dial tcp: i/o timeout" }]);
+    expect(v).toEqual([
+      { label: "request failed", pass: false, detail: "dial tcp: i/o timeout" },
+    ]);
+  });
+
+  it("labels a classified transport failure with the engine's attribution, keeping the raw error as detail", () => {
+    const v = checkExpectations(EMPTY_EXPECT, {
+      status: 0,
+      headers: {},
+      body: "",
+      error: 'Get "https://x": proxy handshake stalled',
+      phase: "proxy",
+      reason: "proxy_timeout",
+    });
+    expect(v).toEqual([
+      {
+        label: "proxy handshake timed out",
+        pass: false,
+        detail: 'Get "https://x": proxy handshake stalled',
+      },
+    ]);
   });
 
   it("reports a bad assertion regex as a failure, not an exception", () => {
@@ -367,6 +389,51 @@ describe("checkExpectations", () => {
       probeResponse({ status: 200, body: '{"a":1}' }),
     );
     expect(v[0]!.detail).toBe("no match for marker");
+  });
+});
+
+describe("failureLabel", () => {
+  it("prefers the reason's words over the phase", () => {
+    expect(failureLabel("dns", "dns_timeout")).toBe("DNS timed out");
+    expect(failureLabel("body", "body_timeout")).toBe("body read timed out");
+    expect(failureLabel("connect", "connect_refused")).toBe("connection refused");
+  });
+
+  it("humanizes a slug from a newer engine instead of dropping it", () => {
+    expect(failureLabel("tls", "quic_handshake_lost")).toBe("quic handshake lost");
+  });
+
+  it("falls back to the phase when the reason is unknown or absent", () => {
+    expect(failureLabel("connect", "unknown")).toBe("TCP connect failed");
+    expect(failureLabel("proxy", undefined)).toBe("proxy handshake failed");
+    // An unobservable stack records no phase either.
+    expect(failureLabel(undefined, "unknown")).toBe("request failed");
+    expect(failureLabel(undefined, undefined)).toBe("request failed");
+  });
+});
+
+describe("phaseLeg", () => {
+  it("puts dial phases on the local→proxy leg and later ones beyond it", () => {
+    expect(phaseLeg("dns", "outbound:a")).toBe("local → proxy");
+    expect(phaseLeg("connect", "pool:p")).toBe("local → proxy");
+    expect(phaseLeg("proxy", "chain:c")).toBe("at the proxy");
+    expect(phaseLeg("tls", "outbound:a")).toBe("proxy → target");
+    expect(phaseLeg("headers", "outbound:a")).toBe("proxy → target");
+    expect(phaseLeg("body", "outbound:a")).toBe("proxy → target");
+  });
+
+  it("collapses both legs into local→target on a direct route", () => {
+    expect(phaseLeg("connect", "direct")).toBe("local → target");
+    expect(phaseLeg("headers", "direct")).toBe("local → target");
+    expect(phaseLeg("headers", "")).toBe("local → target");
+    expect(phaseLeg("headers", undefined)).toBe("local → target");
+  });
+
+  it("says before-dialing for request-phase failures and nothing for a phase it does not know", () => {
+    expect(phaseLeg("request", "outbound:a")).toBe("before dialing");
+    expect(phaseLeg("", "outbound:a")).toBeUndefined();
+    expect(phaseLeg(undefined, "direct")).toBeUndefined();
+    expect(phaseLeg("quic", "direct")).toBeUndefined();
   });
 });
 

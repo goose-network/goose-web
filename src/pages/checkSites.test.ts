@@ -7,8 +7,10 @@ import {
   buildExitRunSpec,
   CHECK_SITE_PRESETS,
   effectiveNumber,
+  editorSeedSites,
   ENGINE_DEFAULT_SITES,
   firstBadSite,
+  savedSiteList,
 } from "./checkSites";
 
 const presetURLs = CHECK_SITE_PRESETS.flatMap((g) => g.sites.map((s) => s.url));
@@ -53,6 +55,35 @@ describe("buildExitRunSpec", () => {
         concurrency: 0,
       }),
     ).toEqual({ sites: ["https://a", "https://b"], outbounds: ["one"], timeout_seconds: 8 });
+  });
+});
+
+describe("savedSiteList", () => {
+  it("keeps a saved list — including an explicitly emptied one — as its own state", () => {
+    // An empty saved list is not "no list": it means every site was deleted
+    // and the engine checks nothing, so an editor must not re-seed defaults.
+    expect(savedSiteList(["https://a"])).toEqual(["https://a"]);
+    expect(savedSiteList([])).toEqual([]);
+  });
+
+  it("reports an unsaved list (absent, or JSON null from the engine) as undefined", () => {
+    expect(savedSiteList(undefined)).toBeUndefined();
+    expect(savedSiteList(null)).toBeUndefined();
+  });
+});
+
+describe("editorSeedSites", () => {
+  it("seeds the engine's defaults when no list is saved, so they are deletable rows", () => {
+    // This is what makes the built-ins deletable on the web (R3): a fresh
+    // engine serves sites:null, and the editors must still show every
+    // default as an ordinary row.
+    expect(editorSeedSites(undefined)).toEqual([...ENGINE_DEFAULT_SITES]);
+    expect(editorSeedSites(null)).toEqual([...ENGINE_DEFAULT_SITES]);
+  });
+
+  it("keeps a saved list — including an emptied one — instead of re-seeding", () => {
+    expect(editorSeedSites(["https://a"])).toEqual(["https://a"]);
+    expect(editorSeedSites([])).toEqual([]);
   });
 });
 
