@@ -14,6 +14,92 @@ import { GooseApiError } from "@goose-network/goose-sdk";
 import type { Engine, ExitCheck, Goose } from "@goose-network/goose-sdk";
 
 // ---------------------------------------------------------------------------
+// Observed network path
+// ---------------------------------------------------------------------------
+//
+// Every persisted record — a `core.RequestMetric` row and a `core.HTTPProbe`
+// result — carries the network path it actually took, as an adjacency list
+// (`core.PathGraph`). Nodes are the engine host ("local"), each proxy server
+// the request dialed, and the target; edges are the legs the engine observed
+// between them, each with its own span, outcome and failure classification.
+// These types are newer than the pinned SDK, so they are declared here (the
+// same reason HTTPProbe below is hand-declared). Every field is optional: the
+// engine omits empty values, a partial graph omits what it could not observe,
+// and an older engine omits `path` entirely — so a reader gets `undefined`
+// rather than a crash, and the view layer in pages/pathGraph.ts decides what
+// an absent field means.
+
+/** One vertex of the path (`core.PathNode`). `id` is the node's identity and
+ *  the shape the engine emits is stable: `"local"`, `"target"`,
+ *  `"proxy:<outboundID>"`, `"proxy:<outboundID>#<n>"` for failover attempt
+ *  n>1, or `"server:<host:port>"` for a server reached with no outbound behind
+ *  it. `kind` is one of `"local"`/`"proxy"`/`"target"` — declared a plain
+ *  string, not a union, because a newer engine could add a kind (the same
+ *  reason HTTPProbe.phase is a plain string). `addressSource` says how
+ *  trustworthy `address` is: `"socket"` means the engine read it off the
+ *  connection it actually made, `"configured"` means it is what the config
+ *  claims and a proxy may sit in front of it. A tunnel-protocol hop
+ *  (psiphon/tor/geph) has no dialable socket address, so `address` is absent —
+ *  not observable is not the same as empty. `attempt` is a 1-based failover
+ *  attempt number, absent when the node was not one of several. */
+export interface PathNode {
+  id?: string;
+  kind?: string;
+  outboundID?: string;
+  address?: string;
+  addressSource?: string;
+  host?: string;
+  /** the requested destination port, on the target node only; a JSON string,
+   *  matching the engine's `Port string` field */
+  port?: string;
+  attempt?: number;
+}
+
+/** One observed leg between two nodes (`core.PathEdge`). `kind` is
+ *  `"dial"`/`"tunnel"`/`"stack"` on current engines (plain string, as above;
+ *  an unknown slug — including the legacy `"pass-through"` an older engine may
+ *  still send — renders through `legLabel`'s humanization).
+ *  `duration` is a Go time.Duration in nanoseconds; it is OMITTED — not zero —
+ *  when the leg was not separately timed (its handshake happened inside the
+ *  same bracketed call as the leg before it), so a reader must treat absent
+ *  and 0 alike as "not timed", never as "instantaneous". `observed` is true on
+ *  every leg the engine records — a leg it could not bracket is omitted and
+ *  flagged via the graph's `partial`, never sent with `observed: false`; the
+ *  only producer of false is this repo's `synthesizePathFromChain`. `collapsed`
+ *  marks a chained hop that threw the
+ *  previous tunnel away and re-dialed from the engine host. On failure,
+ *  `error` is the raw Go string and `phase`/`reason` the classification (the
+ *  same vocabulary HTTPProbe uses); a leg whose phase the classifier bounded
+ *  away keeps `reason` and an empty `phase`. */
+export interface PathEdge {
+  from?: string;
+  to?: string;
+  kind?: string;
+  /** the dial string handed to this leg (the address the plugin was asked to
+   *  reach), which is not necessarily either endpoint's recorded address */
+  target?: string;
+  duration?: number;
+  observed?: boolean;
+  collapsed?: boolean;
+  success?: boolean;
+  error?: string;
+  phase?: string;
+  reason?: string;
+}
+
+/** The whole adjacency list (`core.PathGraph`). `partial` is true when the
+ *  graph may be missing legs — a plugin dialed where the engine could not see,
+ *  a cycle was refused, or a cap cut something; it is NOT "some leg was
+ *  untimed" (that is every successful hop). `dropped` counts nodes a cap cut.
+ *  Both are absent on a complete graph. */
+export interface PathGraph {
+  nodes?: PathNode[];
+  edges?: PathEdge[];
+  partial?: boolean;
+  dropped?: number;
+}
+
+// ---------------------------------------------------------------------------
 // HTTP reachability probes
 // ---------------------------------------------------------------------------
 
@@ -69,6 +155,14 @@ export interface HTTPProbe {
   /** Go time.Duration — nanoseconds, like every other duration on the wire */
   latency?: number;
   startedAt?: string;
+  /** the observed network path of this probe's route (`core.PathGraph`): the
+   *  engine host, each proxy server the route rode and the target as nodes, one
+   *  edge per leg with that leg's own span and outcome. Unlike `phase`/`reason`
+   *  above — which name where the WHOLE request broke — the graph names the leg
+   *  that broke, and a pool failover keeps one edge per attempt. Absent on rows
+   *  from an engine older than path observation and on a job the round's budget
+   *  canceled before it ran. */
+  path?: PathGraph;
 }
 
 /** `POST /api/probes/run` body (`api.probeRunRequest`). */

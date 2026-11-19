@@ -242,6 +242,21 @@ await test("metrics page renders the dashboard", async () => {
   ).catch(() => null);
   console.log(`  (proxied request status: ${proxied?.status() ?? "n/a"})`);
 
+  // --- the observed path: wire first, then the pixels ---
+  //
+  // The wire assertion comes first on purpose: if the engine is not sending
+  // `path` at all, the UI assertions below would only report a missing strip,
+  // and the reason would be invisible. `path` is omitempty on the row, so a
+  // build that predates the path recorder simply omits the key.
+  const metricRows = await api("metrics");
+  assert.ok(Array.isArray(metricRows), "GET /api/metrics did not return a list");
+  const observed = metricRows.filter((m) => m.path && Array.isArray(m.path.nodes));
+  assert.ok(observed.length > 0, "no metric row carried an observed path (`path.nodes`)");
+  const kinds = new Set(observed.flatMap((m) => m.path.nodes.map((n) => n.kind)));
+  for (const kind of ["local", "target"]) {
+    assert.ok(kinds.has(kind), `path nodes never mention a ${kind} node (saw: ${[...kinds].join(", ")})`);
+  }
+
   await page.goto(`${BASE}/metrics`, { waitUntil: "networkidle" });
   const bodyText = await page.locator("body").innerText();
   assert.match(bodyText, /Metrics/, "metrics heading missing");
@@ -255,6 +270,38 @@ await test("metrics page renders the dashboard", async () => {
     /ok|failed|No metrics|No requests/.test(bodyText),
     "no metric rows and no empty state",
   );
+
+  // The strip is what a reader sees first: every path starts at the engine
+  // host, so the first row's strip must name it.
+  await page.waitForSelector(".path-strip", { timeout: 5_000 });
+  assert.match(
+    await page.locator(".path-strip").first().innerText(),
+    /local/,
+    "the first path strip does not mention the engine host",
+  );
+
+  // CI's engine has exactly ONE direct outbound, so the request above rode a
+  // route with no proxy server in it and the graph has no proxy node. The
+  // strip inventing one is the bug this catches: a direct route is the ABSENCE
+  // of a proxy, not a proxy called "direct".
+  assert.equal(
+    await page.locator(".path-strip .path-node.kind-proxy").count(),
+    0,
+    "a direct outbound produced a proxy node on the strip",
+  );
+
+  // The folded pane holds what the strip has no room for: one row per leg.
+  await page.locator(".path-detail summary").first().click();
+  await page.waitForSelector(".path-legs .path-leg", { timeout: 5_000 });
+
+  // WHY there is no failover assertion here: multi-attempt paths come from
+  // dialPoolSnapshot, which numbers its attempts as it walks a pool's members.
+  // This CI engine is configured with one outbound ("direct-1") in one pool
+  // ("pool-default"), so the attempt counter can never get past 1 and a graph
+  // with a second attempt node is unreachable from a live run. Failover is not
+  // left untested, it is untestable against THIS engine: shape (b) in
+  // e2e/fixtures.mjs stubs a refused attempt 1 and a winning attempt 2 so the
+  // strip and its pane have a multi-attempt graph to draw.
 });
 
 await test("exit IP page renders checks or its empty state", async () => {
@@ -323,6 +370,22 @@ await test("a probe run answers, or explains why it cannot", async () => {
     /Results|newer engine build|not wired a runner/,
     "no results and no explanation after Probe now",
   );
+
+  // A completed run draws each result's observed path in the results table.
+  // The same escape hatches the assertion above tolerates apply here: an engine
+  // build that has not wired a probe runner explains itself instead of running
+  // the round, and a round that produced no rows renders its empty state rather
+  // than a table — neither has a cell to hold a strip, so neither may turn CI
+  // red.
+  const mainText = await page.locator("main").innerText();
+  const resultsCard = page.locator("main .card:has(h2:has-text('Results'))");
+  if (
+    !/newer engine build|not wired a runner/.test(mainText) &&
+    (await resultsCard.count()) > 0 &&
+    (await resultsCard.locator("tbody tr").count()) > 0
+  ) {
+    await resultsCard.locator(".path-strip").first().waitFor({ timeout: 5_000 });
+  }
 });
 
 await browser.close();

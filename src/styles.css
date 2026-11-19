@@ -1236,3 +1236,284 @@ button.chip {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* --- observed network path (local → proxy server → target) --- */
+
+/* The path lives in one table cell, so it is a column: the strip on top, the
+   folded pane under it. min-width 0 lets both shrink inside the cell instead
+   of pushing the row's other columns out. */
+.path-cell {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+/* Wraps rather than scrolls: a chain can be several hops and the table already
+   scrolls horizontally as a whole. */
+.path-strip {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 3px 4px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* A chip is never an empty box: an address-less hop (a tunnel plugin) still
+   prints its label. Base styles cover a kind the engine adds later. */
+.path-node {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  background: var(--surface-sunken);
+  white-space: nowrap;
+}
+
+/* The three kinds read apart by ink and weight, not by hue: local is the
+   context, a proxy is the middle hop, the target is the row's question. */
+.path-node.kind-local {
+  color: var(--text-secondary);
+}
+
+.path-node.kind-proxy {
+  color: var(--text-primary);
+}
+
+.path-node.kind-target {
+  font-weight: 550;
+}
+
+/* Dashed edge = the engine never got there. */
+.path-node.unreached {
+  color: var(--text-muted);
+  border-style: dashed;
+}
+
+/* The chip's label is the one thing allowed to shrink, so a long outbound id
+   ellipsises instead of widening the column; the chip's title carries the full
+   text. The nowrap that ellipsis needs comes from `.path-node` itself. */
+.path-node .mono {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A failover attempt's number, lifted like the exponent it is written as. */
+.path-attempt {
+  align-self: flex-start;
+  font-size: 10px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The leg between two chips. `arrowGlyph` already makes a failure a different
+   symbol (✕, not →), so the color is a second signal, not the only one. */
+.path-arrow {
+  flex: none;
+  font-size: 12px;
+  color: var(--status-good-text);
+}
+
+.path-arrow.bad {
+  color: var(--status-critical-text);
+  font-weight: 600;
+}
+
+.path-flag {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.path-detail summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.path-detail[open] summary {
+  margin-bottom: 4px;
+}
+
+.path-detail .hint {
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+
+.path-legs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+
+/* One leg = one grid row: route, kind, span — then the dial string, every
+   caveat and the failure each take a full row under them. The left border is
+   the leg's outcome; the transparent base keeps that 2px from shifting the
+   text when a leg has no outcome to show. */
+.path-leg {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 56px;
+  gap: 2px 8px;
+  align-items: baseline;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-left: 2px solid var(--border);
+  border-radius: var(--radius-s);
+  background: var(--surface-sunken);
+}
+
+.path-leg.ok {
+  border-left-color: var(--status-good);
+}
+
+.path-leg.bad {
+  border-left-color: var(--status-critical);
+}
+
+/* A hop the engine could not dial through the previous connection, so it
+   re-dialed from local: dashed, the same shape used for "not really there". */
+.path-leg.collapsed {
+  border-left-style: dashed;
+}
+
+/* A failed attempt or a collapsed re-dial is not on the strip above, and says
+   so in words as well: a dashed outline and no fill. Longhands on three sides
+   only, so the left bar keeps the ok/bad color it got above. */
+.path-leg.off-strip {
+  border-top: 1px dashed var(--baseline);
+  border-right: 1px dashed var(--baseline);
+  border-bottom: 1px dashed var(--baseline);
+  background: transparent;
+}
+
+/* `table.data .mono` nowrap-s every mono descendant, the pane included, and
+   reaches this nested markup too. The pane is where a leg is read rather than
+   scanned, so each of these opts back out of the nowrap; `.path-leg` in front
+   lifts each one above `table.data .mono` (0,2,1) rather than relying on this
+   block happening to come last. */
+.path-leg-route {
+  min-width: 0;
+}
+
+.path-leg .path-leg-route.mono {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.path-leg-kind {
+  color: var(--text-muted);
+}
+
+/* Spans line up as a column of numbers even though this grid is not a table. */
+.path-leg-time {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
+.path-leg-target {
+  grid-column: 1 / -1;
+}
+
+.path-leg .path-leg-target.mono {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+}
+
+.path-leg-flag {
+  grid-column: 1 / -1;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.path-leg-why {
+  grid-column: 1 / -1;
+  color: var(--status-critical-text);
+}
+
+.path-leg .path-leg-err.mono {
+  grid-column: 1 / -1;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* Every node the engine recorded, including the ones no leg reached. This
+   table sits inside a `table.data` cell, so `table.data th`/`td` (0,1,2) match
+   its cells too — and a bare `.path-nodes thead th` is the SAME (0,1,2),
+   decided only by source order. The `table.data` prefix lifts every rule below
+   to (0,2,2)+, which outranks `table.data th`/`td` no matter where this block
+   sits in the file. */
+.path-nodes {
+  margin-top: 8px;
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+
+table.data .path-nodes thead th {
+  padding: 2px 8px 2px 0;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--baseline);
+  color: var(--text-muted);
+  font-weight: 550;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+table.data .path-nodes tbody td {
+  padding: 2px 8px 2px 0;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--grid);
+  font-size: 11.5px;
+}
+
+/* The outer `table.data th/td:last-child` rule (0,2,2) used to outrank the
+   bare `.path-nodes` compounds (0,1,2) and flush the nested table's last
+   column; the prefix above would otherwise take that back. Keep the flush. */
+table.data .path-nodes thead th:last-child,
+table.data .path-nodes tbody td:last-child {
+  padding-right: 0;
+}
+
+table.data .path-nodes tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* `table.data th.num`/`td.num` already right-align and tabularize these; the
+   compound is here so the nested table does not depend on that rule matching. */
+table.data .path-nodes thead th.num,
+table.data .path-nodes tbody td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* An address is longer than this pane is wide, so it wraps here. */
+table.data .path-nodes tbody td.mono {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Dashed = no successful leg arrived, matching the strip's unreached chip. */
+table.data .path-nodes tbody tr.unreached td {
+  color: var(--text-muted);
+  border-bottom-style: dashed;
+}
+
+/* The strip wraps deliberately, so this cell must not be an `td.ellipsis`;
+   the cap keeps the table's own min-width from ballooning. */
+td.path {
+  max-width: 340px;
+}

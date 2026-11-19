@@ -16,21 +16,30 @@ import { StatTile } from "../charts/StatTile";
 import { PageHeader } from "../components/PageHeader";
 import { DataTable, EmptyState, type Column } from "../components/DataTable";
 import { Notice } from "../components/Notice";
+import { PathStrip } from "../components/PathStrip";
 import { SelectField } from "../components/fields";
 import { SearchInput, matches } from "../components/SearchInput";
 import { compact, formatDuration, formatTime } from "../format";
 import type { RequestMetric as SdkRequestMetric } from "@goose-network/goose-sdk";
+import type { PathGraph } from "../runApi";
+import { pathHaystack } from "./pathGraph";
 import { REASON_LABELS } from "./probeSpec";
 import "../charts/charts.css";
 
 /** The pinned SDK's generated `RequestMetric` predates the engine's failure
- *  classification, so the wire type is widened here — the same pattern
- *  runApi.ts uses for the probe fields. `reason` is a stable slug on failed
- *  rows (`dns_timeout`, `connect_refused`, `proxy_timeout`, ... — the same
- *  vocabulary probe results carry); rows from an older engine, and rows the
- *  engine could not classify, have none. */
+ *  classification and its observed network path, so the wire type is widened
+ *  here — the same pattern runApi.ts uses for the probe fields. `reason` is a
+ *  stable slug on failed rows (`dns_timeout`, `connect_refused`,
+ *  `proxy_timeout`, ... — the same vocabulary probe results carry); rows from
+ *  an older engine, and rows the engine could not classify, have none. `path`
+ *  is the row's observed network path as an adjacency list (`core.PathGraph`):
+ *  the engine host, each proxy server the request actually rode and the target
+ *  as nodes, one edge per leg the engine observed — including one per failed
+ *  pool-failover attempt. Absent on rows from an older engine and on rows
+ *  recorded before path observation existed. */
 export interface RequestMetric extends SdkRequestMetric {
   reason?: string;
+  path?: PathGraph;
 }
 
 // Time buckets offered to the reader, newest window default. `short` names
@@ -104,18 +113,7 @@ function MetricsCard() {
   const hasPrev = windowMs !== Number.POSITIVE_INFINITY && previous.length > 0;
 
   const searched = useMemo(
-    () =>
-      scoped.filter((m) =>
-        matches(
-          // The reason's display label joins the haystack on failed rows —
-          // exactly what the Status pill shows ("no usable outbound"), and
-          // unlike the chain ids it appears nowhere in the raw fields.
-          // Gated on success the same way the pill is, so "failed" never
-          // leaks into a successful row's searchable text.
-          `${m.inboundID ?? ""} ${m.user ?? ""} ${m.target ?? ""} ${(m.chain ?? []).join(" ")} ${m.error ?? ""} ${m.reason ?? ""} ${m.success === true ? "" : failurePill(m.reason)}`,
-          query,
-        ),
-      ),
+    () => scoped.filter((m) => matches(metricHaystack(m), query)),
     [scoped, query],
   );
   useEffect(() => setLimit(PAGE), [query, windowIdx, rows]);
@@ -145,6 +143,12 @@ function MetricsCard() {
         const chain = (m.chain ?? []).join(" → ");
         return <span title={chain}>{chain || "—"}</span>;
       },
+    },
+    {
+      key: "path",
+      header: "Path",
+      className: "path",
+      render: (m) => <PathStrip path={m.path} chain={m.chain} target={m.target} />,
     },
     {
       key: "latency",
@@ -478,4 +482,22 @@ export function targetHost(target: string | undefined): string {
   // strip scheme; keep host:port
   const t = target.replace(/^[a-z0-9+.-]+:\/\//i, "");
   return t.split("/")[0] ?? t;
+}
+
+/** Every searchable token in one row, for the filter box above the table.
+ *
+ *  The reason's display label joins the haystack on failed rows —
+ *  exactly what the Status pill shows ("no usable outbound"), and
+ *  unlike the chain ids it appears nowhere in the raw fields.
+ *  Gated on success the same way the pill is, so "failed" never
+ *  leaks into a successful row's searchable text.
+ *
+ *  The observed path joins it for the same reason: the proxy the request
+ *  actually rode, the address each leg dialed and that leg's own
+ *  classification are all things a reader filters by, and none of them
+ *  appear in the row's other fields — the chain names the route that was
+ *  CONFIGURED, not the one that was taken. A row with no path contributes
+ *  nothing extra: `pathHaystack` is "" for an absent graph. */
+export function metricHaystack(m: RequestMetric): string {
+  return `${m.inboundID ?? ""} ${m.user ?? ""} ${m.target ?? ""} ${(m.chain ?? []).join(" ")} ${m.error ?? ""} ${m.reason ?? ""} ${m.success === true ? "" : failurePill(m.reason)} ${pathHaystack(m.path)}`;
 }

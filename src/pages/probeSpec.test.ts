@@ -617,3 +617,23 @@ describe("PROBE_TARGET_PRESETS", () => {
     }
   });
 });
+
+// The path renderer words every failed leg with failureLabel(edge.phase,
+// edge.reason), and a leg's classification is routinely half-present on the
+// wire: `omitempty` drops whichever field the classifier did not settle on, so
+// an empty string and an absent one both reach the label.
+describe("failureLabel on a half-classified leg", () => {
+  it("words the half it was given, from either side", () => {
+    // A phase and no reason: the phase speaks, in its reader words.
+    expect(failureLabel("tls", undefined)).toBe("TLS handshake failed");
+    expect(failureLabel("tls", "")).toBe("TLS handshake failed");
+    // A reason and no phase — what a leg the classifier bounded away from a
+    // phase keeps: the reason's own words, with no phase to fall back on.
+    expect(failureLabel(undefined, "connect_refused")).toBe("connection refused");
+    expect(failureLabel("", "connect_refused")).toBe("connection refused");
+  });
+
+  it("still says request failed when neither side arrived", () => {
+    expect(failureLabel(undefined, undefined)).toBe("request failed");
+  });
+});

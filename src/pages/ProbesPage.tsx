@@ -30,6 +30,7 @@ import {
 } from "../components/fields";
 import { StringList } from "../components/StringList";
 import { ChipPicker } from "../components/ChipPicker";
+import { PathStrip } from "../components/PathStrip";
 import { formatDuration, formatTime } from "../format";
 import { httpUrl } from "../validate";
 import {
@@ -565,6 +566,22 @@ function ProbeResults({
     { key: "route", header: "Route", className: "mono", render: ({ probe }) => probe.route || "—" },
     { key: "target", header: "Target", className: "mono", render: ({ probe }) => probe.target || "—" },
     {
+      key: "path",
+      header: "Path",
+      className: "path",
+      render: ({ probe }) => (
+        <PathStrip
+          path={probe.path}
+          chain={
+            probe.route === undefined || probe.route === ""
+              ? undefined
+              : [probe.route]
+          }
+          target={probe.target}
+        />
+      ),
+    },
+    {
       key: "status",
       header: "Status",
       className: "nowrap",
@@ -658,9 +675,11 @@ function Verdicts({ verdicts }: { verdicts: Verdict[] }) {
 
 /** The response itself, folded away until asked for: bodies are up to a
  *  megabyte and a table of them would bury the verdicts. What is always worth
- *  showing, though, is *where* the request got to: the first-hop address the
- *  engine dialed, the outbound that served it, the per-phase timings, and on
- *  a failure the leg it broke on — local→proxy or proxy→target. */
+ *  showing, though, is *where* the request got to: the observed path and the leg
+ *  of it that broke, the first-hop address the engine dialed, the outbound that
+ *  served it, and the per-phase timings — the strip says which leg gave up, the
+ *  timings say how long each phase took, and `Dialed … via …` stays the
+ *  one-line answer. */
 function ResponseDetail({ probe }: { probe: HTTPProbe }) {
   const body = probe.body ?? "";
   const error = probe.error ?? "";
@@ -670,7 +689,14 @@ function ResponseDetail({ probe }: { probe: HTTPProbe }) {
   const leg = phaseLeg(probe.phase, probe.route);
   const dialed = probe.dialAddr ?? "";
 
-  if (body === "" && error === "" && names.length === 0 && timings.length === 0 && dialed === "") {
+  if (
+    body === "" &&
+    error === "" &&
+    names.length === 0 &&
+    timings.length === 0 &&
+    dialed === "" &&
+    probe.path === undefined
+  ) {
     return <span className="hint">empty</span>;
   }
 
@@ -683,6 +709,20 @@ function ResponseDetail({ probe }: { probe: HTTPProbe }) {
               probe.truncated === true ? " (truncated)" : ""
             }`}
       </summary>
+      {/* The observed path first: it names the node and the leg, where the
+          phase attribution below names only where the request as a whole gave
+          up. The row's configured route goes along so that when the engine
+          sent no path the strip synthesizes the ROUTE, not a direct hop that
+          contradicts the row's own Route column. */}
+      <PathStrip
+        path={probe.path}
+        chain={
+          probe.route === undefined || probe.route === ""
+            ? undefined
+            : [probe.route]
+        }
+        target={probe.target}
+      />
       {error !== "" && (
         <div className="status-bad probe-error">
           {/* The classified failure first — which leg broke, and how — with
@@ -973,6 +1013,18 @@ function ProbeHistoryCard({ ranAt }: { ranAt: number }) {
     { key: "when", header: "Time", className: "nowrap", render: (p) => formatTime(p.startedAt ?? "") },
     { key: "route", header: "Route", className: "mono", render: (p) => p.route || "—" },
     { key: "target", header: "Target", className: "mono", render: (p) => p.target || "—" },
+    {
+      key: "path",
+      header: "Path",
+      className: "path",
+      render: (p) => (
+        <PathStrip
+          path={p.path}
+          chain={p.route === undefined || p.route === "" ? undefined : [p.route]}
+          target={p.target}
+        />
+      ),
+    },
     { key: "method", header: "Method", render: (p) => p.method || "—" },
     {
       key: "status",
