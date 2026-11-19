@@ -8,8 +8,11 @@
 
 import { chromium } from "playwright-core";
 import assert from "node:assert/strict";
+import http from "node:http";
 
 const BASE = process.env.E2E_BASE_URL ?? "http://127.0.0.1:4173";
+// The engine's HTTP inbound, as declared in .github/workflows/ci.yml.
+const ENGINE_INBOUND = process.env.E2E_PROXY_URL ?? "http://127.0.0.1:18080";
 const CHROME_PATH = process.env.CHROME_PATH;
 
 let failures = 0;
@@ -36,6 +39,47 @@ async function api(path) {
   const res = await page.request.get(`${BASE}/api/${path.replace(/^\//, "")}`);
   assert.equal(res.status(), 200, `GET /api/${path} -> ${res.status()}`);
   return res.json();
+}
+
+// Helper: one real request through the engine's HTTP inbound.
+//
+// The request-target has to be ABSOLUTE-form (`GET http://host/path`). With an
+// origin-form target the inbound has nothing but the Host header to go on, so
+// it derives the target from that — which names the inbound itself, and the
+// request loops back into the engine instead of reaching a target. Playwright's
+// request.get() always sends origin-form, so this goes through node's client,
+// which puts a full URL on the request line when `path` is one.
+function proxyGet(targetUrl, timeoutMs = 10_000) {
+  const proxy = new URL(ENGINE_INBOUND);
+  const target = new URL(targetUrl);
+  return new Promise((resolve) => {
+    const req = http.request(
+      {
+        host: proxy.hostname,
+        port: proxy.port || 80,
+        method: "GET",
+        path: targetUrl,
+        headers: { Host: target.host },
+        timeout: timeoutMs,
+      },
+      (res) => {
+        res.resume();
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, error: "" }));
+        res.on("error", (e) => resolve({ status: 0, error: String(e.message ?? e) }));
+      },
+    );
+    req.on("timeout", () => req.destroy(new Error(`timed out after ${timeoutMs}ms`)));
+    req.on("error", (e) => resolve({ status: 0, error: String(e.message ?? e) }));
+    req.end();
+  });
+}
+
+// Helper: metric rows name the target as "host:port". Normalize whatever the
+// engine recorded there so it can be compared against an origin.
+function targetHost(t) {
+  return String(t ?? "")
+    .replace(/^[a-z][a-z0-9+.-]*:\/\//i, "")
+    .replace(/\/.*$/, "");
 }
 
 // Helper: deletes are two-step (click arms, click again confirms), so a
@@ -233,14 +277,32 @@ await test("provider form shows per-plugin examples while configuring", async ()
 });
 
 await test("metrics page renders the dashboard", async () => {
+  // Premise guard, checked rather than assumed: every "no proxy node"
+  // assertion below only holds if the engine has no proxy outbound to ride.
+  // A config that declares no providers gets the plugin-declared default
+  // seeded (psiphon), and a seeded provider registers one outbound per server
+  // it finds — all of which join the router's all-outbounds fallback, so a
+  // dispatched request can legitimately ride one and record a proxy node.
+  // ci.yml starts the engine with GOOSE_NO_DEFAULT_PROVIDER=1 to keep the
+  // engine exactly as configured; this guard names the cause if that regresses
+  // instead of leaving a baffling assertion about proxy nodes.
+  const outbounds = await api("outbounds");
+  assert.ok(Array.isArray(outbounds) && outbounds.length > 0, "engine reports no outbounds");
+  const nonDirect = outbounds.filter((o) => o.protocol !== "direct");
+  assert.deepEqual(
+    nonDirect.map((o) => `${o.id}:${o.protocol}`),
+    [],
+    "engine has a non-direct outbound, so a request may legitimately ride it",
+  );
+
   // Drive one proxied request through the engine first so metrics exist.
-  // The engine's HTTP inbound rewrites the request to an absolute-form
-  // target; http://example.com is fine for a direct outbound.
-  const proxied = await page.request.get(
-    "http://127.0.0.1:18080/example.com/",
-    { maxRedirects: 0 },
-  ).catch(() => null);
-  console.log(`  (proxied request status: ${proxied?.status() ?? "n/a"})`);
+  // Target the app's own origin: it is always up in CI, needs no external
+  // network, and gives the direct outbound something that answers.
+  const appHost = new URL(BASE).host;
+  const proxied = await proxyGet(`${BASE}/`);
+  console.log(
+    `  (proxied request status: ${proxied.status || "n/a"}${proxied.error ? ` ${proxied.error}` : ""})`,
+  );
 
   // --- the observed path: wire first, then the pixels ---
   //
@@ -248,13 +310,41 @@ await test("metrics page renders the dashboard", async () => {
   // `path` at all, the UI assertions below would only report a missing strip,
   // and the reason would be invisible. `path` is omitempty on the row, so a
   // build that predates the path recorder simply omits the key.
-  const metricRows = await api("metrics");
-  assert.ok(Array.isArray(metricRows), "GET /api/metrics did not return a list");
-  const observed = metricRows.filter((m) => m.path && Array.isArray(m.path.nodes));
+  //
+  // The row is written as the request finishes, which can land a beat after
+  // the response reaches us — poll for it instead of racing the store.
+  let observed = [];
+  let driven = [];
+  for (let i = 0; i < 40 && driven.length === 0; i++) {
+    const metricRows = await api("metrics");
+    assert.ok(Array.isArray(metricRows), "GET /api/metrics did not return a list");
+    observed = metricRows.filter((m) => m.path && Array.isArray(m.path.nodes));
+    driven = observed.filter((m) => targetHost(m.target) === appHost);
+    if (driven.length === 0) await new Promise((r) => setTimeout(r, 250));
+  }
   assert.ok(observed.length > 0, "no metric row carried an observed path (`path.nodes`)");
-  const kinds = new Set(observed.flatMap((m) => m.path.nodes.map((n) => n.kind)));
-  for (const kind of ["local", "target"]) {
-    assert.ok(kinds.has(kind), `path nodes never mention a ${kind} node (saw: ${[...kinds].join(", ")})`);
+
+  // The row for the request just driven: local, then the target, and nothing
+  // in between. A direct route is the ABSENCE of a proxy, not a proxy called
+  // "direct" — so a proxy node here is either an engine regression or the
+  // request never reached this engine.
+  assert.ok(
+    driven.length > 0,
+    `no metric row for the request driven to ${appHost} (saw targets: ${[
+      ...new Set(observed.map((m) => m.target)),
+    ].join(", ")})`,
+  );
+  for (const row of driven) {
+    const ids = row.path.nodes.map((n) => n.id);
+    const kinds = row.path.nodes.map((n) => n.kind);
+    for (const kind of ["local", "target"]) {
+      assert.ok(kinds.includes(kind), `path for ${row.target} has no ${kind} node (saw: ${ids.join(", ")})`);
+    }
+    assert.deepEqual(
+      row.path.nodes.filter((n) => n.kind === "proxy").map((n) => n.id),
+      [],
+      `a direct-only engine recorded a proxy node for ${row.target}`,
+    );
   }
 
   await page.goto(`${BASE}/metrics`, { waitUntil: "networkidle" });
@@ -272,27 +362,33 @@ await test("metrics page renders the dashboard", async () => {
   );
 
   // The strip is what a reader sees first: every path starts at the engine
-  // host, so the first row's strip must name it.
+  // host, so the driven row's strip must name it.
   await page.waitForSelector(".path-strip", { timeout: 5_000 });
+  // Scope the pixel assertions to the row the request above produced. Other
+  // rows on the page are not the dispatch path this invariant is about — a
+  // reachability or HTTP probe row names the server it dialed as a proxy node
+  // even when that server is a direct outbound, because a probe's graph is
+  // the route under test rather than a request's route.
+  const row = page.locator(`tr:has(span[title="${appHost}"])`).first();
+  await row.waitFor({ timeout: 5_000 });
   assert.match(
-    await page.locator(".path-strip").first().innerText(),
+    await row.locator(".path-strip").innerText(),
     /local/,
-    "the first path strip does not mention the engine host",
+    "the driven row's path strip does not mention the engine host",
   );
 
-  // CI's engine has exactly ONE direct outbound, so the request above rode a
-  // route with no proxy server in it and the graph has no proxy node. The
-  // strip inventing one is the bug this catches: a direct route is the ABSENCE
-  // of a proxy, not a proxy called "direct".
+  // Same invariant, now on the pixels: the strip draws a chip per graph node,
+  // so a proxy chip on this row means the UI invented a hop the wire never
+  // carried (the guard above already ruled out the engine sending one).
   assert.equal(
-    await page.locator(".path-strip .path-node.kind-proxy").count(),
+    await row.locator(".path-strip .path-node.kind-proxy").count(),
     0,
-    "a direct outbound produced a proxy node on the strip",
+    "a direct-only engine produced a proxy node on the driven row's strip",
   );
 
   // The folded pane holds what the strip has no room for: one row per leg.
-  await page.locator(".path-detail summary").first().click();
-  await page.waitForSelector(".path-legs .path-leg", { timeout: 5_000 });
+  await row.locator(".path-detail summary").click();
+  await row.locator(".path-legs .path-leg").first().waitFor({ timeout: 5_000 });
 
   // WHY there is no failover assertion here: multi-attempt paths come from
   // dialPoolSnapshot, which numbers its attempts as it walks a pool's members.

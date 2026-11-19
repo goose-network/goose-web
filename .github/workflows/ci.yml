@@ -76,6 +76,14 @@ jobs:
           go build -tags with_quic -o /tmp/goose-bin ./cmd/goose
 
       - name: Start goose engine
+        env:
+          # A config that declares no providers gets the plugin-declared
+          # default seeded (psiphon), which starts a real tunnel and registers
+          # one outbound per server it finds. Those outbounds join the router's
+          # all-outbounds fallback, so a dispatched request can ride one and
+          # the path assertions in e2e/run-e2e.mjs — which hold only for the
+          # direct-only engine configured below — stop holding.
+          GOOSE_NO_DEFAULT_PROVIDER: "1"
         run: |
           mkdir -p /tmp/goose-e2e
           cat > /tmp/goose-e2e/config.json <<'JSON'
