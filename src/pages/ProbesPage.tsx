@@ -144,18 +144,29 @@ function ProbeRunCard({
   const [running, setRunning] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
 
-  // Every route reference the engine can resolve right now, plus "direct".
+  // Every route reference the engine can resolve right now, plus "direct" —
+  // and the subset the all-chip actually stands for. The engine expands an
+  // empty route list to every built outbound (router.probeRoutes), so pools,
+  // chains and "direct" are NOT part of "every outbound" and must not render
+  // as checked under it.
   const routeChoices = useMemo(() => {
     const refs = (ids: Array<string | undefined>, kind: string) =>
       ids
         .filter((id): id is string => id !== undefined && id !== "")
         .map((id) => `${kind}:${id}`);
-    return [
-      ...refs((resources.data?.[0] ?? []).map((o) => o.id), "outbound"),
-      ...refs((resources.data?.[1] ?? []).map((p) => p.id), "pool"),
-      ...refs((resources.data?.[2] ?? []).map((c) => c.id), "chain"),
-      "direct",
-    ];
+    const outboundRefs = refs(
+      (resources.data?.[0] ?? []).map((o) => o.id),
+      "outbound",
+    );
+    return {
+      choices: [
+        ...outboundRefs,
+        ...refs((resources.data?.[1] ?? []).map((p) => p.id), "pool"),
+        ...refs((resources.data?.[2] ?? []).map((c) => c.id), "chain"),
+        "direct",
+      ],
+      implied: outboundRefs,
+    };
   }, [resources.data]);
 
   const run = async () => {
@@ -306,7 +317,8 @@ function ProbeRunCard({
 
         <RawRequestPatch targets={form.targets} patch={patch} />
         <RoutePicker
-          choices={routeChoices}
+          choices={routeChoices.choices}
+          implied={routeChoices.implied}
           selected={form.routes}
           onChange={(routes) => patch({ routes })}
           loading={resources.loading}
@@ -362,15 +374,19 @@ function TargetPresets({
 }
 
 /** Route references to probe through. The nothing-selected choice — "every
- *  built outbound" — is the shared picker's own chip. */
+ *  built outbound" — is the shared picker's own chip, and it covers exactly
+ *  `implied`: those chips render checked under it, and unchecking one trims
+ *  the round to the rest. */
 function RoutePicker({
   choices,
+  implied,
   selected,
   onChange,
   loading,
   error,
 }: {
   choices: string[];
+  implied: string[];
   selected: string[];
   onChange: (routes: string[]) => void;
   loading: boolean;
@@ -380,7 +396,7 @@ function RoutePicker({
     <FieldGroup
       id="probe-routes"
       label="Routes"
-      hint="A pool or chain is probed through its own selection path — the same one dispatch uses."
+      hint="“Every outbound” probes each built outbound — uncheck the ones this round should skip. A pool or chain is probed through its own selection path — the same one dispatch uses."
     >
       <ChipPicker
         id="probe-routes"
@@ -388,6 +404,7 @@ function RoutePicker({
         choices={choices}
         selected={selected}
         onChange={onChange}
+        implied={implied}
       />
       {error !== null ? (
         // The three lists arrive as one Promise.all, so a single endpoint the

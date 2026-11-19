@@ -286,6 +286,84 @@ await test("provider form shows per-plugin examples while configuring", async ()
   await page.click("button:has-text('Cancel')");
 });
 
+await test("outbound form shows per-protocol examples while configuring", async () => {
+  await page.goto(`${BASE}/outbounds`, { waitUntil: "networkidle" });
+  await page.click("button:has-text('New outbound')");
+  // The example under Config (JSON) is whatever the selected protocol's
+  // plugin parses: switching the protocol select must swap it. Markers are
+  // exact substrings of the rendered note/JSON per src/pages/outboundExamples.ts.
+  const hint = page.locator(".kv-editor:has(#out-config) .field-hint");
+  for (const [protocol, marker] of [
+    ["direct", "No config"],
+    ["http", '"address": "proxy.example.com:8080"'],
+    ["psiphon", '"tunnel": "psiphon"'],
+    ["mihomo-vmess", '"type": "vmess"'],
+    ["singbox-shadowsocks", '"cipher": "aes-256-gcm"'],
+  ]) {
+    await page.locator("#out-proto").selectOption(protocol);
+    const hintText = await hint.innerText();
+    assert.ok(
+      hintText.includes(marker),
+      `protocol ${protocol} example missing (looked for ${marker})`,
+    );
+  }
+  // An empty editor offers to insert the example, filling the field with it.
+  await page.locator("#out-proto").selectOption("http");
+  await page
+    .locator(".kv-editor:has(#out-config) button:has-text('Insert example')")
+    .click();
+  const inserted = JSON.parse(await page.locator("#out-config").inputValue());
+  assert.equal(
+    inserted.address,
+    "proxy.example.com:8080",
+    "inserted example lost its address",
+  );
+  // The inserted config made the draft dirty, so cancel is two-step.
+  await page.click("form button:has-text('Cancel')");
+  await page.click("form button:has-text('Discard changes?')");
+  await page.waitForSelector("#out-config", { state: "detached", timeout: 5_000 });
+});
+
+await test("pool form shows selector and filter examples while configuring", async () => {
+  await page.goto(`${BASE}/pools`, { waitUntil: "networkidle" });
+  await page.click("button:has-text('New pool')");
+  // The Selector params example is whatever the chosen strategy parses
+  // (src/pages/poolExamples.ts).
+  const selectorHint = page.locator(
+    ".kv-editor:has(#pool-selector-params) .field-hint",
+  );
+  for (const [strategy, marker] of [
+    ["random", "Takes no params"],
+    ["sticky", '"key": "src+domain"'],
+    ["leastlatency", '"tolerance_ms": 100'],
+  ]) {
+    await page.locator("#pool-selector").selectOption(strategy);
+    const hintText = await selectorHint.innerText();
+    assert.ok(
+      hintText.includes(marker),
+      `selector ${strategy} example missing (looked for ${marker})`,
+    );
+  }
+  // Each filter row's Params example follows that row's filter type.
+  await page.click("button:has-text('Add filter')");
+  const filterHint = page.locator(".kv-editor:has(#filter-params-0) .field-hint");
+  for (const [type, marker] of [
+    ["location", '"countries"'],
+    ["latency", '"max_ms": 300'],
+    ["protocol", '"allow"'],
+  ]) {
+    await page.locator("#filter-type-0").selectOption(type);
+    const hintText = await filterHint.innerText();
+    assert.ok(
+      hintText.includes(marker),
+      `filter ${type} example missing (looked for ${marker})`,
+    );
+  }
+  await page.click("form button:has-text('Cancel')");
+  await page.click("form button:has-text('Discard changes?')");
+  await page.waitForSelector("#pool-id", { state: "detached", timeout: 5_000 });
+});
+
 await test("metrics page renders the dashboard", async () => {
   // Premise guard, checked rather than assumed: every "no proxy node"
   // assertion below only holds if the engine has no proxy outbound to ride.
@@ -478,6 +556,70 @@ await test("probe page renders the run form and a history or an explanation", as
       bodyText,
     ),
     `history has neither rows, an empty state, nor an explanation: ${bodyText.slice(-300)}`,
+  );
+});
+
+await test("probe routes: every outbound reads as checked and can be trimmed", async () => {
+  await page.goto(`${BASE}/probes`, { waitUntil: "networkidle" });
+  const group = '[aria-labelledby="probe-routes-label"]';
+  const chipSel = (ref) => `${group} label.chip:has(span:text-is("${ref}"))`;
+  const allSel = `${group} label.chip:has-text("every outbound")`;
+
+  const [outbounds, pools] = await Promise.all([api("outbounds"), api("pools")]);
+  assert.ok(outbounds.length > 0, "engine reports no outbounds to probe");
+  if (pools.length === 0) return; // trimming needs a non-implied chip to add
+
+  const firstOut = `outbound:${outbounds[0].id}`;
+  const firstPool = `pool:${pools[0].id}`;
+  await page.waitForSelector(chipSel(firstOut), { timeout: 10_000 });
+  const checked = (sel) => page.locator(`${sel} input`).isChecked();
+
+  // A fresh form selects nothing, which on the wire means "every outbound":
+  // the engine expands an empty route list to the built outbounds ONLY, so
+  // outbound chips read as checked under the all-chip — and a pool or the
+  // literal "direct" route, which the expansion never covers, does not.
+  assert.ok(await checked(allSel), "all-chip not checked on a fresh form");
+  for (const o of outbounds.slice(0, 5)) {
+    assert.ok(
+      await checked(chipSel(`outbound:${o.id}`)),
+      `outbound:${o.id} not checked under "every outbound"`,
+    );
+  }
+  assert.ok(!(await checked(chipSel(firstPool))), "pool checked under every outbound");
+  assert.ok(
+    !(await checked(`${group} label.chip:has(span:text-is("direct"))`)),
+    '"direct" checked under "every outbound"',
+  );
+
+  // Checking a chip the all-mode does not cover materializes the implied set
+  // plus that chip — the picker leaves all-mode.
+  await page.locator(chipSel(firstPool)).click();
+  await page.waitForSelector(`${allSel}.on`, { state: "detached", timeout: 5_000 });
+  assert.ok(await checked(chipSel(firstOut)), "materializing dropped an implied outbound");
+  assert.ok(await checked(chipSel(firstPool)), "checked pool chip not on");
+
+  // Unchecking one outbound trims it from the round; the others stay in.
+  await page.locator(chipSel(firstOut)).click();
+  await page.waitForSelector(`${chipSel(firstOut)}.on`, {
+    state: "detached",
+    timeout: 5_000,
+  });
+  assert.ok(await checked(chipSel(firstPool)), "trimming one outbound dropped the pool");
+  for (const o of outbounds.slice(1, 5)) {
+    assert.ok(
+      await checked(chipSel(`outbound:${o.id}`)),
+      `trimming one outbound dropped outbound:${o.id}`,
+    );
+  }
+
+  // Removing the extra chip leaves exactly the implied set, which collapses
+  // back to the all-chip — the round stays dynamic instead of pinning a
+  // materialized copy of "every outbound" into the spec.
+  await page.locator(chipSel(firstPool)).click();
+  await page.waitForSelector(`${allSel}.on`, { timeout: 5_000 });
+  assert.ok(
+    await checked(chipSel(firstOut)),
+    "collapse did not re-check the trimmed outbound",
   );
 });
 

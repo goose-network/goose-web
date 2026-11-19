@@ -3,14 +3,26 @@
 
 import { useEffect, useState } from "react";
 
+/** A worked example for whatever shape the editor currently wants — the
+ *  selected protocol's config, the selected selector's params. Rendered under
+ *  the editor, and insertable while the editor is empty: an example you can
+ *  put in the field beats one you have to copy by hand. */
+export interface JsonExample {
+  /** One or two sentences on what the config takes and what is optional. */
+  note: string;
+  /** The example object itself, as it would be committed. */
+  config: Record<string, unknown>;
+}
+
 export interface KvEditorProps {
   id: string;
   label: string;
   value: Record<string, unknown> | undefined;
   onChange: (value: Record<string, unknown>) => void;
+  example?: JsonExample | undefined;
 }
 
-export function KvEditor({ id, label, value, onChange }: KvEditorProps) {
+export function KvEditor({ id, label, value, onChange, example }: KvEditorProps) {
   // Edit as pretty-printed JSON text; validate on change and commit only
   // when it parses. The full JSON shape stays reachable (nested arrays for
   // country lists, etc.) without building a per-plugin schema UI.
@@ -49,6 +61,15 @@ export function KvEditor({ id, label, value, onChange }: KvEditorProps) {
     }
   };
 
+  // Inserting overwrites the text, so the button is offered only while the
+  // editor is empty — and only when the example has something to insert. An
+  // empty-config example ("this protocol needs no config") is still worth
+  // showing as the note under the field.
+  const insertable =
+    example !== undefined &&
+    text.trim() === "" &&
+    Object.keys(example.config).length > 0;
+
   return (
     <div className="field kv-editor">
       <label htmlFor={id}>{label}</label>
@@ -63,6 +84,38 @@ export function KvEditor({ id, label, value, onChange }: KvEditorProps) {
       {parseError !== null && (
         <div role="alert" style={{ color: "var(--status-critical)" }}>
           {parseError}
+        </div>
+      )}
+      {example !== undefined && (
+        <div
+          className="field-hint"
+          style={{ display: "block", whiteSpace: "normal" }}
+        >
+          <span>
+            {example.note}{" "}
+            {insertable && (
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => update(JSON.stringify(example.config, null, 2))}
+              >
+                Insert example
+              </button>
+            )}
+          </span>
+          <pre
+            className="mono"
+            style={{
+              margin: "4px 0 0 0",
+              padding: "8px 10px",
+              background: "var(--bg-inset, #f5f5f5)",
+              borderRadius: 6,
+              overflowX: "auto",
+              fontSize: "0.85em",
+            }}
+          >
+            {JSON.stringify(example.config, null, 2)}
+          </pre>
         </div>
       )}
     </div>

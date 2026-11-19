@@ -14,11 +14,10 @@ import { KvEditor } from "../components/KvEditor";
 import type { Inbound } from "@goose-network/goose-sdk";
 import type { components } from "@goose-network/goose-sdk";
 import type { FilterSpec } from "./poolTypes";
+import { FILTERS, filterExample } from "./poolExamples";
 
 type User = components["schemas"]["config.User"];
 type Policy = components["schemas"]["config.InboundPolicy"];
-
-const FILTERS = ["location", "latency", "protocol"] as const;
 
 export function InboundsPage() {
   const { goose } = useSdk();
@@ -407,6 +406,7 @@ function FilterList({
               next[i] = { ...next[i]!, params };
               onChange(next);
             }}
+            example={filterExample(f.type ?? "location")}
           />
           <button
             type="button"

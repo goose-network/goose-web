@@ -12,10 +12,13 @@ import { SearchInput, matches } from "../components/SearchInput";
 import { SelectField, TextField, FieldGroup } from "../components/fields";
 import { StringList } from "../components/StringList";
 import { KvEditor } from "../components/KvEditor";
+import {
+  FILTERS,
+  filterExample,
+  SELECTORS,
+  selectorExample,
+} from "./poolExamples";
 import type { Pool, FilterSpec } from "./poolTypes";
-
-const SELECTORS = ["random", "roundrobin", "sticky", "leastlatency"] as const;
-const FILTERS = ["location", "latency", "protocol"] as const;
 
 export function PoolsPage() {
   const { goose } = useSdk();
@@ -228,6 +231,9 @@ function PoolForm({
         onChange={(params) =>
           set({ selector: { ...(draft.selector ?? { type: "random" }), params } })
         }
+        // What the chosen strategy parses, at the moment of configuration:
+        // picking a strategy swaps the example under the editor.
+        example={selectorExample(draft.selector?.type ?? "random")}
       />
 
       <FieldGroup id="pool-filters" label="Filters" hint="Applied in order; a member must pass all of them.">
@@ -246,6 +252,7 @@ function PoolForm({
                 label="Params (JSON)"
                 value={f.params}
                 onChange={(params) => setFilter(i, { params })}
+                example={filterExample(f.type ?? "location")}
               />
               <button
                 type="button"

@@ -11,32 +11,8 @@ import { ConfirmButton } from "../components/ConfirmButton";
 import { SearchInput, matches } from "../components/SearchInput";
 import { SelectField, TextField } from "../components/fields";
 import { KvEditor } from "../components/KvEditor";
+import { outboundExample, PROTOCOLS } from "./outboundExamples";
 import type { OutboundSpec } from "@goose-network/goose-sdk";
-
-// Protocols registered by the engine's plugin set (include/register.go).
-// mihomo-*/singbox-* outbounds are normally created by their provider
-// plugins from a subscription, but manual creation stays possible.
-const PROTOCOLS = [
-  "direct",
-  "http",
-  "socks5",
-  "psiphon",
-  "mihomo-ss",
-  "mihomo-vmess",
-  "mihomo-vless",
-  "mihomo-trojan",
-  "mihomo-socks5",
-  "mihomo-http",
-  "singbox-socks",
-  "singbox-http",
-  "singbox-shadowsocks",
-  "singbox-vmess",
-  "singbox-vless",
-  "singbox-trojan",
-  "singbox-snell",
-  "singbox-ssh",
-  "singbox-anytls",
-] as const;
 
 export function OutboundsPage() {
   const { goose } = useSdk();
@@ -141,6 +117,10 @@ export function OutboundsPage() {
             label="Config (JSON)"
             value={r.draft.config}
             onChange={(config) => r.setDraft({ ...r.draft!, config })}
+            // What this protocol's plugin parses, at the moment of
+            // configuration: picking a protocol swaps the example under the
+            // editor, and an empty editor offers to insert it.
+            example={outboundExample(r.draft.protocol ?? "direct")}
           />
         </FormCard>
       )}
