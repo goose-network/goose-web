@@ -232,7 +232,17 @@ await test("create + delete a subscription provider through the UI", async () =>
   // Pool IDs is a list editor: add one entry and fill it.
   await page.click("button:has-text('Add pool')");
   await page.locator("#prov-pools").fill(`pool-${id}`);
-  await page.locator("#prov-url").fill("http://127.0.0.1:18080/example.com/");
+  // The subscription URL must NOT point at the engine's own HTTP inbound
+  // (ENGINE_INBOUND). The provider fetches this URL directly; aimed at the
+  // inbound it loops back into the engine, which derives the target from the
+  // origin-form request's Host header — the inbound itself — and self-loops.
+  // Each attempt times out (10s) and the provider retries on a schedule, so a
+  // single create floods /api/metrics with inbound-targeted rows (reproduced:
+  // 10k+ rows, 168 MB db) that then bury the row the metrics test drives.
+  // The app origin (BASE) is always up, never loops, and is what this CRUD
+  // test actually needs: a well-formed URL the form accepts. The fetch lands
+  // on the static server, finds no subscription nodes, and logs once.
+  await page.locator("#prov-url").fill(`${BASE}/e2e-subscription-probe`);
   await page.click("button:has-text('Save')");
   await page.waitForSelector(`tr:has-text('${id}')`, { timeout: 5_000 });
   const after = await api("providers");
@@ -313,16 +323,35 @@ await test("metrics page renders the dashboard", async () => {
   //
   // The row is written as the request finishes, which can land a beat after
   // the response reaches us — poll for it instead of racing the store.
+  //
+  // Ask for a wide window: /api/metrics returns the newest n rows (default
+  // 100), so anything else writing rows concurrently can push the one row
+  // driven above out of view and report a missing path when the engine sent
+  // one. Widening the window makes "not there yet" and "not there at all" the
+  // only remaining explanations.
   let observed = [];
   let driven = [];
   for (let i = 0; i < 40 && driven.length === 0; i++) {
-    const metricRows = await api("metrics");
+    const metricRows = await api("metrics?n=1000");
     assert.ok(Array.isArray(metricRows), "GET /api/metrics did not return a list");
     observed = metricRows.filter((m) => m.path && Array.isArray(m.path.nodes));
     driven = observed.filter((m) => targetHost(m.target) === appHost);
     if (driven.length === 0) await new Promise((r) => setTimeout(r, 250));
   }
   assert.ok(observed.length > 0, "no metric row carried an observed path (`path.nodes`)");
+
+  // Name the flood if it ever comes back, instead of leaving a bare "no row
+  // for the driven request": rows targeting the engine's own inbound mean
+  // something is fetching ENGINE_INBOUND, and each pass self-loops and records
+  // again. The provider test above is the one that used to do this.
+  const inboundHost = new URL(ENGINE_INBOUND).host;
+  const looped = observed.filter((m) => targetHost(m.target) === inboundHost);
+  assert.equal(
+    looped.length,
+    0,
+    `${looped.length} metric rows target the engine's own inbound (${inboundHost}): ` +
+      `something is fetching it, and each pass loops back in and records again`,
+  );
 
   // The row for the request just driven: local, then the target, and nothing
   // in between. A direct route is the ABSENCE of a proxy, not a proxy called
