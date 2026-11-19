@@ -280,6 +280,6 @@ function normalize(p: Pool): Pool {
     ...p,
     outbound_ids: p.outbound_ids ?? [],
     filters: (p.filters ?? []).map((f) => ({ ...f, params: f.params ?? {} })),
-    selector: { type: "random", ...(p.selector ?? {}), params: p.selector?.params ?? {} },
+    selector: { ...(p.selector ?? {}), type: p.selector?.type || "random", params: p.selector?.params ?? {} },
   };
 }

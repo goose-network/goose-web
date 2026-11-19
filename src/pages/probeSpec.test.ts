@@ -22,6 +22,8 @@ import {
   parseStatuses,
   phaseLeg,
   probeResponse,
+  probeRoundProblem,
+  PROBE_CAPS,
   PROBE_TARGET_PRESETS,
   type ProbeSpecFields,
 } from "./probeSpec";
@@ -493,6 +495,65 @@ describe("buildProbeSpec", () => {
     expect(buildProbeSpec({ ...empty, targets: ["https://a"], method: "PUT", body: "x" }).body).toBe(
       "x",
     );
+  });
+});
+
+describe("probeRoundProblem", () => {
+  const routes = (n: number) => Array.from({ length: n }, (_, i) => `outbound:o${i}`);
+
+  it("allows a round inside both caps", () => {
+    expect(probeRoundProblem(routes(PROBE_CAPS.maxRoutes), 1, 0)).toBeNull();
+    expect(probeRoundProblem(routes(3), 2, 0)).toBeNull();
+    // The fan-out cap is a product, so it is reached exactly at 512 requests.
+    expect(
+      probeRoundProblem(routes(PROBE_CAPS.maxRoutes), PROBE_CAPS.maxFanout / PROBE_CAPS.maxRoutes, 0),
+    ).toBeNull();
+  });
+
+  it("blocks one route past the route cap — an exact list is exact", () => {
+    const problem = probeRoundProblem(routes(PROBE_CAPS.maxRoutes + 1), 1, 0);
+    expect(problem?.blocked).toBe(true);
+    expect(problem?.message).toContain(String(PROBE_CAPS.maxRoutes));
+  });
+
+  it("blocks one request past the fan-out cap", () => {
+    // 128 routes × 5 targets = 640, over 512, with the route count legal.
+    const problem = probeRoundProblem(routes(PROBE_CAPS.maxRoutes), 5, 0);
+    expect(problem?.blocked).toBe(true);
+    expect(problem?.message).toContain(String(PROBE_CAPS.maxFanout));
+    expect(problem?.message).toContain("640");
+  });
+
+  it("reports the route cap first, the way the engine does", () => {
+    // RunHTTPProbes checks the route list before it multiplies, so a list of
+    // 129 with 10 targets must not read as a fan-out complaint.
+    const problem = probeRoundProblem(routes(PROBE_CAPS.maxRoutes + 1), 10, 0);
+    expect(problem?.message).toContain("129 routes");
+  });
+
+  it("warns, without blocking, when all-mode rests on an estimate", () => {
+    // An empty list expands server-side over the BUILT outbounds; the caller's
+    // count is the CONFIGURED ones, an upper bound it cannot verify. So a
+    // 476-outbound fleet is worth warning about, but not worth disabling the
+    // button over: some of those may have failed to build.
+    const problem = probeRoundProblem([], 1, 476);
+    expect(problem).not.toBeNull();
+    expect(problem?.blocked).toBe(false);
+    expect(problem?.message).toContain("476");
+    expect(problem?.message.toLowerCase()).toContain("cannot see");
+  });
+
+  it("stays quiet in all-mode inside the estimate", () => {
+    expect(probeRoundProblem([], 1, PROBE_CAPS.maxRoutes)).toBeNull();
+    // Nothing loaded yet is not a fleet of zero routes.
+    expect(probeRoundProblem([], 1, 0)).toBeNull();
+  });
+
+  it("blocks trimming a fleet past the cap — the case the picker makes easy", () => {
+    // 476 outbounds; unchecking one chip materializes the other 475.
+    const implied = routes(476);
+    const trimmed = implied.filter((r) => r !== "outbound:o0");
+    expect(probeRoundProblem(trimmed, 1, implied.length)?.blocked).toBe(true);
   });
 });
 

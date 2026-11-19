@@ -38,9 +38,14 @@ const SELECTOR_EXAMPLES: Record<Selector, JsonExample> = {
   },
 };
 
-/** The example for one selector type, or undefined for an unknown one. */
+/** The example for one selector type, or undefined for an unknown one.
+ *  The engine treats "" as a random alias (internal/selector/selector.go:
+ *  `case "", "random"`), and provider-managed pools — including a stock
+ *  engine's own "default" pool — serialize selector.type "" on the wire, so
+ *  map it to random or their edit form shows no example at all. */
 export function selectorExample(type: string): JsonExample | undefined {
-  return (SELECTOR_EXAMPLES as Record<string, JsonExample | undefined>)[type];
+  const t = type === "" ? "random" : type;
+  return (SELECTOR_EXAMPLES as Record<string, JsonExample | undefined>)[t];
 }
 
 // ---------------------------------------------------------------------------
@@ -49,7 +54,7 @@ export function selectorExample(type: string): JsonExample | undefined {
 
 const FILTER_EXAMPLES: Record<FilterType, JsonExample> = {
   location: {
-    note: "Admits members by where their server resolves to. “countries” and “provinces” are allowlists, “exclude” a denylist; all case-insensitive ISO-style codes. A member with no known location passes only when no allowlist is set.",
+    note: "Admits members by where their server resolves to. “countries” and “provinces” are allowlists, “exclude” a denylist; all case-insensitive ISO-style codes. Today no outbound reports a location — the engine's geo resolver is still a no-op stub — so this filter admits every member whatever you put here; the keys document the shape it parses once a resolver is wired.",
     config: { countries: ["us", "jp"], exclude: ["cn"] },
   },
   latency: {

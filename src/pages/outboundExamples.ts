@@ -13,7 +13,10 @@
 
 import type { JsonExample } from "../components/KvEditor";
 
-// Protocols registered by the engine's plugin set (include/register.go).
+// Protocols the outbound form's select offers — a subset of what the engine
+// registers (include/register.go also blank-imports tor and geph, and the
+// mihomo/singbox plugins register more types than are listed here). A protocol
+// outside this catalog gets no example rather than a wrong one.
 // mihomo-*/singbox-* outbounds are normally created by their provider
 // plugins from a subscription, but manual creation stays possible.
 export const PROTOCOLS = [
@@ -48,7 +51,7 @@ function mihomoExample(
   mapping: Record<string, unknown>,
 ): JsonExample {
   return {
-    note: `Built by the embedded mihomo core from one Clash-dialect proxy mapping under “proxy”, whose “type” must be “${type}”. TLS types also take “tls”, “sni”/“servername” and “skip-cert-verify”; “network”: “ws” adds a “ws-opts” object. A mihomo provider normally creates these from a subscription.`,
+    note: `Built by the embedded mihomo core from one Clash-dialect proxy mapping under “proxy”, whose “type” must be “${type}”. The TLS types take “tls” and “skip-cert-verify”; vmess/vless/trojan/http also take a server-name key (“servername” or “sni”), while socks5 derives its TLS server name from “server”. “network”: “ws” adds a “ws-opts” object. A mihomo provider normally creates these from a subscription.`,
     config: { proxy: { type, ...mapping } },
   };
 }
@@ -68,7 +71,7 @@ function singboxExample(
 
 const EXAMPLES: Record<Protocol, JsonExample> = {
   direct: {
-    note: "No config — the engine dials targets itself, through its own network stack.",
+    note: "No config required — the engine dials targets itself, through its own network stack. “address” is optional and only labels the outbound in metrics; the dial path ignores it.",
     config: {},
   },
   http: {
@@ -88,7 +91,7 @@ const EXAMPLES: Record<Protocol, JsonExample> = {
     },
   },
   psiphon: {
-    note: "Rides a running psiphon provider's tunnel: “tunnel” is the provider's outbound ID (default “psiphon”). With no “server” the general tunnel picks any exit; “server” pins one IP from the provider's live list, “region” biases the exit country. The provider normally creates one outbound per server itself.",
+    note: "Rides a running psiphon provider's tunnel: “tunnel” is the provider's outbound ID (default “psiphon”). With no “server” the general tunnel picks any exit; “server” pins one IP from the provider's live list. (The “region” a provider stamps on its server specs is informational — it labels the outbound and does not steer the exit.) The provider normally creates one outbound per server itself.",
     config: { tunnel: "psiphon" },
   },
   "mihomo-ss": mihomoExample("ss", {

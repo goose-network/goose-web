@@ -78,6 +78,35 @@ describe("impliedChoices", () => {
     expect(impliedChoices(CHOICES, undefined)).toEqual(CHOICES);
     expect(impliedChoices(CHOICES, IMPLIED)).toEqual(IMPLIED);
   });
+
+  it("narrows to nothing when the caller says the all-mode is unenumerable", () => {
+    // An explicit [] is a narrowing, not an omission: ExitChecksPage passes it
+    // because the engine skips address-less outbounds before it looks at the
+    // selection, so no chip can be promised.
+    expect(impliedChoices(CHOICES, [])).toEqual([]);
+  });
+});
+
+describe("a picker that implies nothing", () => {
+  // The exit-check run card: "every outbound" means every built outbound that
+  // has a server address, a set this page cannot enumerate.
+  it("reads no chip as checked in all-mode", () => {
+    for (const ref of CHOICES) {
+      expect(chipChecked([], [], ref), ref).toBe(false);
+    }
+  });
+
+  it("pins exactly one chip on the first click", () => {
+    expect(toggleChoice([], [], "pool:default")).toEqual(["pool:default"]);
+  });
+
+  it("still toggles within the explicit selection afterwards", () => {
+    expect(toggleChoice(["pool:default"], [], "chain:relay")).toEqual([
+      "pool:default",
+      "chain:relay",
+    ]);
+    expect(toggleChoice(["pool:default"], [], "pool:default")).toEqual([]);
+  });
 });
 
 describe("chipChecked", () => {
@@ -146,6 +175,20 @@ describe("toggleChoice", () => {
     expect(
       toggleChoice(one, IMPLIED, "outbound:psiphon-5.6.7.8"),
     ).toEqual(["outbound:psiphon-1.2.3.4", "pool:default", "outbound:psiphon-5.6.7.8"]);
+  });
+
+  it("materializes a large all-mode into every chip but the one unchecked", () => {
+    // A real fleet: unchecking one chip has to name the rest explicitly, in
+    // order, because that is the only way to say "all but this one" on the
+    // wire — and it is what makes the engine's route cap reachable from here
+    // (see probeRoundProblem).
+    const implied = Array.from({ length: 476 }, (_, i) => `outbound:o${i}`);
+    const next = toggleChoice([], implied, "outbound:o0");
+    expect(next).toHaveLength(475);
+    expect(next).toEqual(implied.slice(1));
+    // … and re-checking the one that was dropped says "every outbound" again
+    // rather than leaving a frozen list of 475 behind.
+    expect(toggleChoice(next, implied, "outbound:o0")).toEqual([]);
   });
 
   it("does not collapse onto an empty implied set", () => {

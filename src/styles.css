@@ -928,6 +928,15 @@ button:disabled {
   flex: 1;
 }
 
+/* A JSON sample under a config field (the KvEditor's per-protocol example,
+   the provider form's plugin example). Sunken so it reads as a value to copy
+   rather than prose, and in the primary ink: the muted hint colour above it
+   is for sentences, and code in muted ink on a dark theme is a squint. */
+pre.json-sample {
+  background: var(--surface-sunken);
+  color: var(--text-primary);
+}
+
 /* users editor (inbound form) */
 .user-row {
   display: grid;

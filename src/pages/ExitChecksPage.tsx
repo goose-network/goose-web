@@ -523,14 +523,24 @@ function SingleRunCard({
       <FieldGroup
         id="run-outbounds"
         label="Outbounds"
-        hint="Nothing selected checks every outbound that has a server address."
+        hint="Nothing selected checks every outbound that has a server address. Outbounds without one — a tunnel or a “direct” — have no exit IP of their own to report, so the engine skips them here and no chip below reads as checked in that mode."
       >
+        {/* implied={[]}: this list is not what the engine's all-mode stands
+            for. It skips any outbound whose Address() is empty *before* it
+            looks at the selection (internal/exitip/manager.go), so "every
+            outbound" here is the address-bearing subset of the BUILT ones —
+            which /api/outbounds cannot tell this page about, since it serves
+            the configured specs and each plugin reports its address under its
+            own key. Rendering every chip as checked would promise a check for
+            outbounds the round will skip; naming none leaves the hint to
+            describe the rule, and a click still pins one chip exactly. */}
         <ChipPicker
           id="run-outbounds"
           allLabel="every outbound"
           choices={ids}
           selected={only}
           onChange={setOnly}
+          implied={[]}
         />
         {ids.length === 0 && !outbounds.loading && outbounds.error === null && (
           <div className="field-hint">

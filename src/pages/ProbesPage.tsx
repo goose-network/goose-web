@@ -32,7 +32,7 @@ import { StringList } from "../components/StringList";
 import { ChipPicker } from "../components/ChipPicker";
 import { PathStrip } from "../components/PathStrip";
 import { formatDuration, formatTime } from "../format";
-import { httpUrl } from "../validate";
+import { cleanList, httpUrl } from "../validate";
 import {
   buildExpectations,
   buildProbeSpec,
@@ -49,11 +49,13 @@ import {
   parseStatuses,
   phaseLeg,
   probeResponse,
+  probeRoundProblem,
   PROBE_TARGET_PRESETS,
   REASON_LABELS,
   type ExpectationFields,
   type Expectations,
   type Header,
+  type ProbeCapProblem,
   type ProbeSpecFields,
   type Verdict,
 } from "./probeSpec";
@@ -90,12 +92,24 @@ const INITIAL_FORM: ProbeForm = {
   expect: { statuses: "", headers: [], body: [] },
 };
 
+/** The route references this engine can be asked about, with what the picker's
+ *  all-chip stands for and whether that list is trustworthy yet. */
+interface RouteChoices {
+  /** every reference the engine can resolve, plus the bare "direct" */
+  choices: string[];
+  /** the subset the empty selection expands to: one ref per configured outbound */
+  implied: string[];
+  loading: boolean;
+  error: string | null;
+}
+
 // History depths offered. The default below must be one of them: a select whose
 // value matches no option renders with nothing selected.
 const ROW_OPTIONS = [100, 200, 500, 1000, 5000];
 const PAGE = 50;
 
 export function ProbesPage() {
+  const { goose } = useSdk();
   const [form, setForm] = useState<ProbeForm>(INITIAL_FORM);
   const patch = useCallback(
     (p: Partial<ProbeForm>) => setForm((f) => ({ ...f, ...p })),
@@ -106,50 +120,23 @@ export function ProbesPage() {
   const [ranAt, setRanAt] = useState(0);
   const onRan = useCallback(() => setRanAt((n) => n + 1), []);
 
-  return (
-    <>
-      <PageHeader
-        title="Reachability probe"
-        sub="Send a real HTTP request toward targets through chosen routes, assert on the response, and keep every result as a metric — once by hand, or on a schedule."
-      />
-      <ProbeRunCard form={form} patch={patch} onRan={onRan} />
-      <ScheduledProbeCard form={form} />
-      <ProbeHistoryCard ranAt={ranAt} />
-    </>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Manual run
-// ---------------------------------------------------------------------------
-
-function ProbeRunCard({
-  form,
-  patch,
-  onRan,
-}: {
-  form: ProbeForm;
-  patch: (p: Partial<ProbeForm>) => void;
-  onRan: () => void;
-}) {
-  const { goose } = useSdk();
-  const { toast } = useToast();
   const resources = useAsync(
     () =>
       Promise.all([goose.listOutbounds(), goose.listPools(), goose.listChains()]),
     [goose],
   );
 
-  const [outcome, setOutcome] = useState<RunOutcome | null>(null);
-  const [running, setRunning] = useState(false);
-  const [runError, setRunError] = useState<string | null>(null);
-
   // Every route reference the engine can resolve right now, plus "direct" —
   // and the subset the all-chip actually stands for. The engine expands an
-  // empty route list to every built outbound (router.probeRoutes), so pools,
+  // empty route list to every BUILT outbound (router.probeRoutes), so pools,
   // chains and "direct" are NOT part of "every outbound" and must not render
-  // as checked under it.
-  const routeChoices = useMemo(() => {
+  // as checked under it. `implied` therefore comes from `/api/outbounds`,
+  // which serves the CONFIGURED specs: it is an upper bound on what a round in
+  // all-mode will actually probe, since an outbound that fails to build drops
+  // out of the expansion and there is no endpoint that reports the built set.
+  // Fetched once here, above both cards, so the run form's picker and the
+  // schedule's cap estimate cannot disagree about the fleet.
+  const routes = useMemo<RouteChoices>(() => {
     const refs = (ids: Array<string | undefined>, kind: string) =>
       ids
         .filter((id): id is string => id !== undefined && id !== "")
@@ -166,8 +153,55 @@ function ProbeRunCard({
         "direct",
       ],
       implied: outboundRefs,
+      loading: resources.loading,
+      error: resources.error,
     };
-  }, [resources.data]);
+  }, [resources.data, resources.loading, resources.error]);
+
+  return (
+    <>
+      <PageHeader
+        title="Reachability probe"
+        sub="Send a real HTTP request toward targets through chosen routes, assert on the response, and keep every result as a metric — once by hand, or on a schedule."
+      />
+      <ProbeRunCard form={form} patch={patch} onRan={onRan} routes={routes} />
+      <ScheduledProbeCard form={form} estimatedRoutes={routes.implied.length} />
+      <ProbeHistoryCard ranAt={ranAt} />
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Manual run
+// ---------------------------------------------------------------------------
+
+function ProbeRunCard({
+  form,
+  patch,
+  onRan,
+  routes: routeChoices,
+}: {
+  form: ProbeForm;
+  patch: (p: Partial<ProbeForm>) => void;
+  onRan: () => void;
+  routes: RouteChoices;
+}) {
+  const { goose } = useSdk();
+  const { toast } = useToast();
+
+  const [outcome, setOutcome] = useState<RunOutcome | null>(null);
+  const [running, setRunning] = useState(false);
+  const [runError, setRunError] = useState<string | null>(null);
+
+  // The engine rejects an over-cap round outright, and trimming a large fleet
+  // is the easiest way to make one: unchecking a single chip names the other
+  // four hundred. Judge the round here, where the fix is one click away,
+  // rather than surfacing a 400 after the reader hit "Probe now".
+  const roundProblem = probeRoundProblem(
+    form.routes,
+    cleanList(form.targets).length,
+    routeChoices.implied.length,
+  );
 
   const run = async () => {
     // Whatever happens next, the previous round's table is not the answer to
@@ -184,6 +218,10 @@ function ProbeRunCard({
     }
     if (bad !== undefined) {
       setRunError(`“${bad}” is not an absolute http(s) URL.`);
+      return;
+    }
+    if (roundProblem?.blocked === true) {
+      setRunError(roundProblem.message);
       return;
     }
 
@@ -240,7 +278,16 @@ function ProbeRunCard({
             type="button"
             className="primary"
             onClick={() => void run()}
-            disabled={running}
+            // Only an exact breach disables the round: one this page can
+            // compute the way the engine will. An estimate the built fleet may
+            // still satisfy leaves the button live, and the notice below says
+            // why the reader may still see a rejection.
+            disabled={running || roundProblem?.blocked === true}
+            title={
+              roundProblem?.blocked === true
+                ? roundProblem.message
+                : undefined
+            }
           >
             {running ? "Probing…" : "Probe now"}
           </button>
@@ -317,12 +364,10 @@ function ProbeRunCard({
 
         <RawRequestPatch targets={form.targets} patch={patch} />
         <RoutePicker
-          choices={routeChoices.choices}
-          implied={routeChoices.implied}
+          routes={routeChoices}
           selected={form.routes}
           onChange={(routes) => patch({ routes })}
-          loading={resources.loading}
-          error={resources.error}
+          problem={roundProblem}
         />
 
         <h3 className="card-sub">Assertions</h3>
@@ -376,45 +421,44 @@ function TargetPresets({
 /** Route references to probe through. The nothing-selected choice — "every
  *  built outbound" — is the shared picker's own chip, and it covers exactly
  *  `implied`: those chips render checked under it, and unchecking one trims
- *  the round to the rest. */
+ *  the round to the rest. Trimming a large fleet is where the engine's own
+ *  caps bite, so `problem` is reported here, next to the control that caused
+ *  it, rather than only on the button. */
 function RoutePicker({
-  choices,
-  implied,
+  routes,
   selected,
   onChange,
-  loading,
-  error,
+  problem,
 }: {
-  choices: string[];
-  implied: string[];
+  routes: RouteChoices;
   selected: string[];
   onChange: (routes: string[]) => void;
-  loading: boolean;
-  error: string | null;
+  problem: ProbeCapProblem | null;
 }) {
   return (
     <FieldGroup
       id="probe-routes"
       label="Routes"
-      hint="“Every outbound” probes each built outbound — uncheck the ones this round should skip. A pool or chain is probed through its own selection path — the same one dispatch uses."
+      hint="“Every outbound” probes each built outbound — uncheck the ones this round should skip. A pool or chain is probed through its own selection path — the same one dispatch uses. The engine caps a round at 128 routes and 512 requests, so trimming a fleet larger than that names too many to run."
     >
       <ChipPicker
         id="probe-routes"
         allLabel="every outbound"
-        choices={choices}
+        choices={routes.choices}
         selected={selected}
         onChange={onChange}
-        implied={implied}
+        implied={routes.implied}
       />
-      {error !== null ? (
+      {problem !== null && <Notice>{problem.message}</Notice>}
+      {routes.error !== null ? (
         // The three lists arrive as one Promise.all, so a single endpoint the
         // engine lacks empties every group — and "direct is the only route"
         // would then state as a fact about the config what is really a failure
         // to ask about it.
-        <Notice>Could not list routes: {error}</Notice>
+        <Notice>Could not list routes: {routes.error}</Notice>
       ) : (
-        !loading &&
-        choices.length <= 1 && (
+        !routes.loading &&
+        routes.choices.length <= 1 && (
           <div className="field-hint">
             No outbounds, pools or chains are configured yet, so “direct” is the only route.
           </div>
@@ -800,7 +844,14 @@ function phaseTimingRows(p: HTTPProbe): Array<[string, number]> {
 // Schedule
 // ---------------------------------------------------------------------------
 
-function ScheduledProbeCard({ form }: { form: ProbeForm }) {
+function ScheduledProbeCard({
+  form,
+  estimatedRoutes,
+}: {
+  form: ProbeForm;
+  /** how many routes an all-mode spec will expand to, at most */
+  estimatedRoutes: number;
+}) {
   const { goose } = useSdk();
   const { toast } = useToast();
   const engine = useAsync(() => goose.getEngine(), [goose]);
@@ -831,9 +882,18 @@ function ScheduledProbeCard({ form }: { form: ProbeForm }) {
   // copying an empty form would quietly stop a schedule that works — which is
   // what "Clear the HTTP probe" exists to do deliberately.
   const formHasTargets = form.targets.some((t) => t.trim() !== "");
+  // The same caps the run form judges, applied to what is about to be stored.
+  // Without this a spec trimmed from a large fleet can be saved with a
+  // "Probe schedule saved" toast and then fail every interval: the engine
+  // rejects the whole round, so nothing it was meant to measure happens.
+  const scheduleProblem = probeRoundProblem(
+    http?.routes ?? [],
+    targets.length,
+    estimatedRoutes,
+  );
 
   const save = async () => {
-    if (badTarget !== undefined) return;
+    if (badTarget !== undefined || scheduleProblem?.blocked === true) return;
     setSaving(true);
     setSaveError(null);
     try {
@@ -941,6 +1001,9 @@ function ScheduledProbeCard({ form }: { form: ProbeForm }) {
           it. Fix it in the form above and copy the settings again.
         </Notice>
       )}
+      {targets.length > 0 && scheduleProblem !== null && (
+        <Notice>{scheduleProblem.message}</Notice>
+      )}
       {saveError !== null && (
         <Notice onDismiss={() => setSaveError(null)}>{saveError}</Notice>
       )}
@@ -950,7 +1013,12 @@ function ScheduledProbeCard({ form }: { form: ProbeForm }) {
           type="button"
           className="primary"
           onClick={() => void save()}
-          disabled={saving || badTarget !== undefined}
+          disabled={
+            saving || badTarget !== undefined || scheduleProblem?.blocked === true
+          }
+          title={
+            scheduleProblem?.blocked === true ? scheduleProblem.message : undefined
+          }
         >
           {saving ? "Saving…" : "Save schedule"}
         </button>

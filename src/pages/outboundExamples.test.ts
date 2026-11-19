@@ -19,7 +19,7 @@ describe("outboundExample", () => {
     expect(outboundExample("")).toBeUndefined();
   });
 
-  it("gives direct an empty config — it takes no params", () => {
+  it("gives direct an empty config — nothing is required", () => {
     expect(outboundExample("direct")?.config).toEqual({});
   });
 

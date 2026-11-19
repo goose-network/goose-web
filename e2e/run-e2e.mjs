@@ -359,6 +359,34 @@ await test("pool form shows selector and filter examples while configuring", asy
       `filter ${type} example missing (looked for ${marker})`,
     );
   }
+
+  // Both editors offer to insert what they show, and insert the strategy's own
+  // shape — an example you can put in the field, not one you have to retype.
+  await page.locator("#pool-selector").selectOption("sticky");
+  await page
+    .locator(".kv-editor:has(#pool-selector-params) button:has-text('Insert example')")
+    .click();
+  const selectorParams = JSON.parse(
+    await page.locator("#pool-selector-params").inputValue(),
+  );
+  assert.equal(
+    selectorParams.key,
+    "src+domain",
+    "inserted selector example lost its key",
+  );
+  await page.locator("#filter-type-0").selectOption("latency");
+  await page
+    .locator(".kv-editor:has(#filter-params-0) button:has-text('Insert example')")
+    .click();
+  const filterParams = JSON.parse(
+    await page.locator("#filter-params-0").inputValue(),
+  );
+  assert.equal(
+    filterParams.max_ms,
+    300,
+    "inserted filter example lost its max_ms",
+  );
+
   await page.click("form button:has-text('Cancel')");
   await page.click("form button:has-text('Discard changes?')");
   await page.waitForSelector("#pool-id", { state: "detached", timeout: 5_000 });
@@ -564,63 +592,116 @@ await test("probe routes: every outbound reads as checked and can be trimmed", a
   const group = '[aria-labelledby="probe-routes-label"]';
   const chipSel = (ref) => `${group} label.chip:has(span:text-is("${ref}"))`;
   const allSel = `${group} label.chip:has-text("every outbound")`;
+  const pill = page.locator(".card-head .pill").first();
 
-  const [outbounds, pools] = await Promise.all([api("outbounds"), api("pools")]);
+  const outbounds = await api("outbounds");
   assert.ok(outbounds.length > 0, "engine reports no outbounds to probe");
-  if (pools.length === 0) return; // trimming needs a non-implied chip to add
-
   const firstOut = `outbound:${outbounds[0].id}`;
-  const firstPool = `pool:${pools[0].id}`;
+  // The extra chip that all-mode does not cover. "direct" is always offered
+  // (ProbesPage appends it to the route list) and no outbound chip can collide
+  // with it — those render as "outbound:<id>" — so this needs no pool, and an
+  // engine with only outbounds still exercises the trimming path.
+  const extra = "direct";
+
+  // Past FILTER_AT the picker hides unmatched chips behind its filter box, so
+  // a chip is only clickable once it is on screen: type its reference in first
+  // when the box exists, then clear it again.
+  const filterBox = page.locator(`#probe-routes-filter`);
+  const reveal = async (ref) => {
+    if ((await filterBox.count()) === 0) return;
+    await filterBox.fill(ref);
+    await page.waitForSelector(chipSel(ref), { timeout: 5_000 });
+  };
+  const click = async (ref) => {
+    await reveal(ref);
+    await page.locator(chipSel(ref)).click();
+  };
+  const checked = async (sel) =>
+    (await page.locator(sel).count()) > 0 &&
+    (await page.locator(`${sel} input`).first().isChecked());
+  // The card-head pill words the round as the form holds it, and is the one
+  // place that shows a large materialized selection at a glance — past the
+  // picker's pin threshold none of those chips are on screen.
+  const pillRoutes = (n) => `${n} route${n === 1 ? "" : "s"}`;
+
   await page.waitForSelector(chipSel(firstOut), { timeout: 10_000 });
-  const checked = (sel) => page.locator(`${sel} input`).isChecked();
+
+  // The hint states the caps the trimming affordance can run into, so the
+  // reader learns them before the picker hits them. (It sits beside the group,
+  // not inside it — FieldGroup renders hint as a sibling of the role=group.)
+  assert.match(
+    await page
+      .locator(`.field:has(${group}) > .field-hint`)
+      .first()
+      .innerText(),
+    /128 routes and 512 requests/,
+    "route hint lost the engine's caps",
+  );
 
   // A fresh form selects nothing, which on the wire means "every outbound":
   // the engine expands an empty route list to the built outbounds ONLY, so
   // outbound chips read as checked under the all-chip — and a pool or the
   // literal "direct" route, which the expansion never covers, does not.
   assert.ok(await checked(allSel), "all-chip not checked on a fresh form");
+  assert.match(await pill.innerText(), /every outbound/, "pill does not say every outbound");
   for (const o of outbounds.slice(0, 5)) {
+    await reveal(`outbound:${o.id}`);
     assert.ok(
       await checked(chipSel(`outbound:${o.id}`)),
       `outbound:${o.id} not checked under "every outbound"`,
     );
   }
-  assert.ok(!(await checked(chipSel(firstPool))), "pool checked under every outbound");
-  assert.ok(
-    !(await checked(`${group} label.chip:has(span:text-is("direct"))`)),
-    '"direct" checked under "every outbound"',
-  );
+  await reveal(extra);
+  assert.ok(await checked(chipSel(extra)) === false, `"${extra}" checked under every outbound`);
 
   // Checking a chip the all-mode does not cover materializes the implied set
   // plus that chip — the picker leaves all-mode.
-  await page.locator(chipSel(firstPool)).click();
+  await click(extra);
   await page.waitForSelector(`${allSel}.on`, { state: "detached", timeout: 5_000 });
+  await reveal(firstOut);
   assert.ok(await checked(chipSel(firstOut)), "materializing dropped an implied outbound");
-  assert.ok(await checked(chipSel(firstPool)), "checked pool chip not on");
+  assert.match(
+    await pill.innerText(),
+    new RegExp(`${pillRoutes(outbounds.length + 1)}$`),
+    "pill does not count the materialized round",
+  );
 
   // Unchecking one outbound trims it from the round; the others stay in.
-  await page.locator(chipSel(firstOut)).click();
+  await click(firstOut);
   await page.waitForSelector(`${chipSel(firstOut)}.on`, {
     state: "detached",
     timeout: 5_000,
   });
-  assert.ok(await checked(chipSel(firstPool)), "trimming one outbound dropped the pool");
+  await reveal(extra);
+  assert.ok(await checked(chipSel(extra)), "trimming one outbound dropped the extra route");
+  await reveal(firstOut);
   for (const o of outbounds.slice(1, 5)) {
-    assert.ok(
-      await checked(chipSel(`outbound:${o.id}`)),
-      `trimming one outbound dropped outbound:${o.id}`,
-    );
+    const ref = `outbound:${o.id}`;
+    await reveal(ref);
+    assert.ok(await checked(chipSel(ref)), `trimming one outbound dropped ${ref}`);
   }
+  assert.match(
+    await pill.innerText(),
+    new RegExp(`${pillRoutes(outbounds.length)}$`),
+    "pill did not follow the trim",
+  );
 
-  // Removing the extra chip leaves exactly the implied set, which collapses
-  // back to the all-chip — the round stays dynamic instead of pinning a
-  // materialized copy of "every outbound" into the spec.
-  await page.locator(chipSel(firstPool)).click();
+  // Putting the trimmed chip back and then dropping the extra leaves exactly
+  // the implied set, which collapses back to the all-chip — the round stays
+  // dynamic instead of pinning a materialized copy of "every outbound" into
+  // the spec. (Done in that order because the collapse fires on whatever the
+  // selection happens to equal at the moment of the click.)
+  await click(firstOut);
+  await reveal(firstOut);
+  assert.ok(await checked(chipSel(firstOut)), "re-checking the trimmed outbound did not take");
+  await click(extra);
   await page.waitForSelector(`${allSel}.on`, { timeout: 5_000 });
+  await reveal(firstOut);
   assert.ok(
     await checked(chipSel(firstOut)),
-    "collapse did not re-check the trimmed outbound",
+    "collapse did not leave the implied set checked",
   );
+  assert.match(await pill.innerText(), /every outbound/, "pill did not return to all-mode");
 });
 
 await test("a probe run answers, or explains why it cannot", async () => {

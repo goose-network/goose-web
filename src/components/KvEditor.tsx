@@ -22,6 +22,22 @@ export interface KvEditorProps {
   example?: JsonExample | undefined;
 }
 
+/** Whether the editor should offer to insert its example. Inserting
+ *  overwrites the text, so the offer is only honest while the editor is empty
+ *  — and only when the example has something to insert. An empty-config
+ *  example ("this protocol needs no config") still earns its place as the note
+ *  under the field; it is just not an insertion. */
+export function exampleInsertable(
+  example: JsonExample | undefined,
+  text: string,
+): boolean {
+  return (
+    example !== undefined &&
+    text.trim() === "" &&
+    Object.keys(example.config).length > 0
+  );
+}
+
 export function KvEditor({ id, label, value, onChange, example }: KvEditorProps) {
   // Edit as pretty-printed JSON text; validate on change and commit only
   // when it parses. The full JSON shape stays reachable (nested arrays for
@@ -62,13 +78,8 @@ export function KvEditor({ id, label, value, onChange, example }: KvEditorProps)
   };
 
   // Inserting overwrites the text, so the button is offered only while the
-  // editor is empty — and only when the example has something to insert. An
-  // empty-config example ("this protocol needs no config") is still worth
-  // showing as the note under the field.
-  const insertable =
-    example !== undefined &&
-    text.trim() === "" &&
-    Object.keys(example.config).length > 0;
+  // editor is empty — and only when the example has something to insert.
+  const insertable = exampleInsertable(example, text);
 
   return (
     <div className="field kv-editor">
@@ -104,11 +115,10 @@ export function KvEditor({ id, label, value, onChange, example }: KvEditorProps)
             )}
           </span>
           <pre
-            className="mono"
+            className="mono json-sample"
             style={{
               margin: "4px 0 0 0",
               padding: "8px 10px",
-              background: "var(--bg-inset, #f5f5f5)",
               borderRadius: 6,
               overflowX: "auto",
               fontSize: "0.85em",

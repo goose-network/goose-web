@@ -297,6 +297,62 @@ export function orDefault(
     : { value: stored, defaulted: false };
 }
 
+/** The engine's hard limits on one probe round (internal/router/httpprobe.go:
+ *  `maxProbeRoutes`, `maxProbeFanout`). Either one rejects the *whole* round
+ *  before a single request goes out — there is no partial run to look at. */
+export const PROBE_CAPS = { maxRoutes: 128, maxFanout: 512 } as const;
+
+/** One round the caps will not allow, in the engine's own terms. */
+export interface ProbeCapProblem {
+  /** True when the breach is arithmetic the engine will repeat exactly, so
+   *  the round must not be offered at all. False when it rests on an estimate
+   *  the engine may not share — then say so and let the reader try. */
+  blocked: boolean;
+  message: string;
+}
+
+/**
+ * Why this round cannot run, or null when the caps allow it.
+ *
+ * An explicit route list is exact: `probeRoutes` only trims and dedupes a
+ * non-empty list, so the engine runs precisely those references and both caps
+ * are plain arithmetic — `blocked` is true and the reader should not be sent
+ * off to collect a 400. That is what makes trimming a large fleet dangerous:
+ * unchecking one chip out of 476 names the other 475.
+ *
+ * An empty list is not: the engine expands it to one "outbound:<id>" per
+ * *built* outbound, and `/api/outbounds` serves the *configured* specs — there
+ * is no built-state endpoint. So `estimatedRoutes` is the configured count,
+ * which is an upper bound (an outbound that fails to build drops out). A
+ * breach there is a warning, not a block.
+ */
+export function probeRoundProblem(
+  routes: string[],
+  targetCount: number,
+  estimatedRoutes: number,
+): ProbeCapProblem | null {
+  const exact = routes.length > 0;
+  const count = exact ? routes.length : estimatedRoutes;
+  // The estimate is what it is: a ceiling the engine may come in under.
+  const caveat = exact
+    ? ""
+    : " The engine counts the outbounds that actually built, which this page cannot see, so the real figure may be lower.";
+  if (count > PROBE_CAPS.maxRoutes) {
+    return {
+      blocked: exact,
+      message: `${count} routes exceeds the engine's ${PROBE_CAPS.maxRoutes}-route limit per round — narrow the selection.${caveat}`,
+    };
+  }
+  const fanout = targetCount * count;
+  if (fanout > PROBE_CAPS.maxFanout) {
+    return {
+      blocked: exact,
+      message: `${targetCount} target${targetCount === 1 ? "" : "s"} × ${count} route${count === 1 ? "" : "s"} is ${fanout} requests, over the engine's ${PROBE_CAPS.maxFanout}-per-round limit — drop a target or a route.${caveat}`,
+    };
+  }
+  return null;
+}
+
 const encoder = new TextEncoder();
 
 /** UTF-8 byte length. The engine caps and truncates response bodies by

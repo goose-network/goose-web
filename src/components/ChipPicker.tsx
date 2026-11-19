@@ -7,7 +7,12 @@
 // "every outbound" names every id in its list — but a caller can narrow it:
 // the engine expands an empty probe-route list to the built outbounds only, so
 // the probe page passes just its outbound:* refs and a pool, chain or "direct"
-// chip honestly renders unchecked under "every outbound".
+// chip honestly renders unchecked under "every outbound". An explicit empty
+// implied set is the other end of that: nothing renders checked under the
+// all-chip, and a click pins exactly one chip. That is what a caller passes
+// when the engine's own all-mode covers a set it cannot enumerate —
+// ExitChecksPage, where the engine skips address-less outbounds before it ever
+// looks at the selection.
 //
 // Because nothing selected already selects the implied set, those chips render
 // checked, and unchecking one materializes the set minus that chip: "every
@@ -155,7 +160,14 @@ export function ChipPicker({
       </div>
       {filter !== "" && shown.length < choices.length && (
         <div className="field-hint">
-          Showing {shown.length} of {choices.length}.
+          Showing {shown.length} of {choices.length}
+          {/* A selection larger than FILTER_AT is not pinned into the filtered
+              view — see visibleChoices — so without this the reader is looking
+              at a box of unchecked chips while hundreds of them are selected. */}
+          {selected.length > 0
+            ? ` — ${selected.length} selected`
+            : ""}
+          .
         </div>
       )}
     </>

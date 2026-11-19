@@ -376,11 +376,10 @@ function PluginHelp({ plugin }: { plugin: Plugin }) {
           {info.example.label}:
         </div>
         <pre
-          className="mono"
+          className="mono json-sample"
           style={{
             margin: "4px 0 0 0",
             padding: "8px 10px",
-            background: "var(--bg-inset, #f5f5f5)",
             borderRadius: 6,
             overflowX: "auto",
             fontSize: "0.85em",

@@ -21,6 +21,11 @@ describe("selectorExample", () => {
     expect(selectorExample("nope")).toBeUndefined();
   });
 
+  it("treats the engine's \"\" selector alias as random", () => {
+    // A stock engine's provider-managed "default" pool serializes type "".
+    expect(selectorExample("")).toEqual(selectorExample("random"));
+  });
+
   it("takes no params for random and roundrobin", () => {
     expect(selectorExample("random")?.config).toEqual({});
     expect(selectorExample("roundrobin")?.config).toEqual({});
@@ -72,9 +77,10 @@ describe("filterExample", () => {
     }
   });
 
-  it("keeps list values lowercase where the engine lowercases them", () => {
-    // The engine's set() lowercases; an example in any other case would
-    // teach a shape that silently never matches.
+  it("keeps list values lowercase, matching the form the engine normalizes to", () => {
+    // The engine lowercases BOTH sides — set() on the config values and
+    // Allow() on the looked-up location — so case never changes what matches.
+    // Lowercase examples simply mirror the canonical form the engine stores.
     const config = filterExample("location")?.config ?? {};
     for (const key of ["countries", "provinces", "exclude"] as const) {
       for (const v of (config[key] as string[] | undefined) ?? []) {
