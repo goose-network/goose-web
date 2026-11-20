@@ -77,6 +77,19 @@ describe("filterExample", () => {
     }
   });
 
+  it("keeps the location example off the allowlist keys", () => {
+    // No outbound reports a location — the built-ins never assign the field,
+    // external plugins return nil, and engine.go still builds
+    // geo.NewManager(geo.Noop()). internal/filter's Allow() returns
+    // len(countries)==0 && len(provinces)==0 for a nil location, so ANY
+    // allowlist rejects every member and "exclude" is never reached: the pool
+    // would fail every request with "no outbound passed filters". Location is
+    // also the form's default filter type, so this example is one click away
+    // from that. "exclude" alone stays safe (and inert).
+    const config = filterExample("location")?.config ?? {};
+    expect(Object.keys(config).sort()).toEqual(["exclude"]);
+  });
+
   it("keeps list values lowercase, matching the form the engine normalizes to", () => {
     // The engine lowercases BOTH sides — set() on the config values and
     // Allow() on the looked-up location — so case never changes what matches.

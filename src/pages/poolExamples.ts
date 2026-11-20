@@ -54,8 +54,15 @@ export function selectorExample(type: string): JsonExample | undefined {
 
 const FILTER_EXAMPLES: Record<FilterType, JsonExample> = {
   location: {
-    note: "Admits members by where their server resolves to. “countries” and “provinces” are allowlists, “exclude” a denylist; all case-insensitive ISO-style codes. Today no outbound reports a location — the engine's geo resolver is still a no-op stub — so this filter admits every member whatever you put here; the keys document the shape it parses once a resolver is wired.",
-    config: { countries: ["us", "jp"], exclude: ["cn"] },
+    // No outbound reports a location: the built-ins never assign the field,
+    // every external plugin returns nil, and engine.go still constructs
+    // geo.NewManager(geo.Noop()). internal/filter admits an unknown location
+    // ONLY when no allowlist is set — so a countries/provinces example would
+    // reject every member and fail every request through the pool with
+    // "no outbound passed filters". An example one click away from that (this
+    // is the default filter type) has to be the shape that stays safe.
+    note: "Admits members by where their server resolves to: “countries” and “provinces” are allowlists, “exclude” a denylist, all case-insensitive ISO-style codes. No outbound reports a location yet — the engine's geo resolver is a no-op stub — and an unknown location passes only when no allowlist is set, so a “countries” or “provinces” list admits nothing today and every request through the pool fails with “no outbound passed filters”. Set only “exclude” until a resolver is wired; it is inert in the meantime, which is why it is the example here.",
+    config: { exclude: ["cn"] },
   },
   latency: {
     note: "Admits members by measured health. “max_ms” caps recent latency in milliseconds (or “max” as a duration string like “250ms”); “min_success” floors the success ratio (0–1). Unmeasured members pass, so a fresh pool is not locked out.",

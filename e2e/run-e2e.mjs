@@ -348,7 +348,7 @@ await test("pool form shows selector and filter examples while configuring", asy
   await page.click("button:has-text('Add filter')");
   const filterHint = page.locator(".kv-editor:has(#filter-params-0) .field-hint");
   for (const [type, marker] of [
-    ["location", '"countries"'],
+    ["location", '"exclude"'],
     ["latency", '"max_ms": 300'],
     ["protocol", '"allow"'],
   ]) {
@@ -685,6 +685,25 @@ await test("probe routes: every outbound reads as checked and can be trimmed", a
     new RegExp(`${pillRoutes(outbounds.length)}$`),
     "pill did not follow the trim",
   );
+
+  // The loop above walks at most four "others", so on a single-outbound engine
+  // — CI's fixture — it runs zero iterations and proves nothing about the trim
+  // staying scoped to the one chip. Where the picker has no filter box it
+  // renders every chip, so count the checked ones directly instead: the
+  // remaining outbounds plus the extra route, and nothing else. Past
+  // FILTER_AT the DOM holds filter-matched chips only (visibleChoices does not
+  // pin a large selection), so the count is meaningless there and the pill —
+  // an exact count of a materialized selection — carries the invariant alone.
+  if ((await filterBox.count()) === 0) {
+    const on = await page.locator(`${group} .chip-scroll label.chip.on`).count();
+    const remainingOutbounds = outbounds.length - 1; // firstOut was trimmed
+    const extraRoute = 1; // the chip all-mode never covers
+    assert.equal(
+      on,
+      remainingOutbounds + extraRoute,
+      "trim did not leave the other chips checked",
+    );
+  }
 
   // Putting the trimmed chip back and then dropping the extra leaves exactly
   // the implied set, which collapses back to the all-chip — the round stays
