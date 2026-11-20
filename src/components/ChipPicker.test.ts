@@ -1,13 +1,20 @@
 // src/components/ChipPicker.test.ts — the rules behind the bounded
 // outbound/route picker: what shows through a filter, what reads as checked,
-// and what one click on a chip commits.
+// what one click on a chip commits, and how a selection reads back in words.
 
 import { describe, expect, it } from "vitest";
 import {
+  ALL_SELECTED,
   chipChecked,
-  impliedChoices,
-  toggleChoice,
+  covers,
+  isNothingSelected,
+  NONE_SELECTED,
+  nothingSelectedProblem,
+  selectionWord,
+  toggleAll,
+  toggleChip,
   visibleChoices,
+  type ChipGroup,
 } from "./ChipPicker";
 
 const CHOICES = [
@@ -16,11 +23,16 @@ const CHOICES = [
   "pool:default",
   "chain:relay",
 ];
-// The engine expands an empty probe-route list to the built outbounds only.
-const IMPLIED = [
-  "outbound:psiphon-1.2.3.4",
-  "outbound:psiphon-5.6.7.8",
+// The probe picker's pool: one click selects the members, not the pool ref,
+// because a round through "pool:x" asks the pool's selector to pick ONE of
+// them and says nothing about the rest.
+const POOL: ChipGroup[] = [
+  {
+    ref: "pool:default",
+    members: ["outbound:psiphon-1.2.3.4", "outbound:psiphon-5.6.7.8"],
+  },
 ];
+const explicit = (...refs: string[]) => ({ all: false, refs });
 
 describe("visibleChoices", () => {
   it("shows every choice with no filter", () => {
@@ -52,9 +64,8 @@ describe("visibleChoices", () => {
   });
 
   it("lets a large selection go through the filter", () => {
-    // "Every outbound minus one", materialized from all-mode, would otherwise
-    // pin hundreds of checked chips into view and defeat the filter at the
-    // fleet sizes that need it.
+    // A fleet-wide explicit list would otherwise pin hundreds of checked chips
+    // into view and defeat the filter at the fleet sizes that need it.
     const many = Array.from({ length: 20 }, (_, i) => `outbound:relay-${i}`);
     const choices = [...many, "pool:default"];
     expect(visibleChoices(choices, many, "relay-1")).toEqual([
@@ -73,134 +84,195 @@ describe("visibleChoices", () => {
   });
 });
 
-describe("impliedChoices", () => {
-  it("is every choice unless the caller narrows it", () => {
-    expect(impliedChoices(CHOICES, undefined)).toEqual(CHOICES);
-    expect(impliedChoices(CHOICES, IMPLIED)).toEqual(IMPLIED);
-  });
-
-  it("narrows to nothing when the caller says the all-mode is unenumerable", () => {
-    // An explicit [] is a narrowing, not an omission: ExitChecksPage passes it
-    // because the engine skips address-less outbounds before it looks at the
-    // selection, so no chip can be promised.
-    expect(impliedChoices(CHOICES, [])).toEqual([]);
-  });
-});
-
-describe("a picker that implies nothing", () => {
-  // The exit-check run card: "every outbound" means every built outbound that
-  // has a server address, a set this page cannot enumerate.
-  it("reads no chip as checked in all-mode", () => {
-    for (const ref of CHOICES) {
-      expect(chipChecked([], [], ref), ref).toBe(false);
-    }
-  });
-
-  it("pins exactly one chip on the first click", () => {
-    expect(toggleChoice([], [], "pool:default")).toEqual(["pool:default"]);
-  });
-
-  it("still toggles within the explicit selection afterwards", () => {
-    expect(toggleChoice(["pool:default"], [], "chain:relay")).toEqual([
-      "pool:default",
-      "chain:relay",
+describe("covers", () => {
+  it("is a group's members, not the group's own ref", () => {
+    expect(covers(POOL, "pool:default")).toEqual([
+      "outbound:psiphon-1.2.3.4",
+      "outbound:psiphon-5.6.7.8",
     ]);
-    expect(toggleChoice(["pool:default"], [], "pool:default")).toEqual([]);
+  });
+
+  it("is the ref itself for a plain chip", () => {
+    expect(covers(POOL, "chain:relay")).toEqual(["chain:relay"]);
+  });
+
+  it("falls back to the ref for a group with no members", () => {
+    // An empty pool still selects something a round can answer for — the
+    // engine reports no usable outbound — rather than a click that looks like
+    // it did nothing.
+    expect(covers([{ ref: "pool:empty", members: [] }], "pool:empty")).toEqual([
+      "pool:empty",
+    ]);
   });
 });
 
 describe("chipChecked", () => {
-  it("reads the implied set as checked when nothing is selected", () => {
-    // "Every outbound" is a choice that selects the implied set, so those
-    // chips show what the round will actually do.
-    expect(chipChecked([], IMPLIED, "outbound:psiphon-1.2.3.4")).toBe(true);
-    // … and only the implied set: a pool is not covered by "every outbound".
-    expect(chipChecked([], IMPLIED, "pool:default")).toBe(false);
+  it("reads no chip as checked in all-mode", () => {
+    // The round's own set is the engine's to enumerate — the built outbounds,
+    // which no endpoint reports — so no chip can promise it.
+    for (const ref of CHOICES) {
+      expect(chipChecked(ALL_SELECTED, POOL, ref), ref).toBe(false);
+    }
   });
 
-  it("follows the explicit selection once one exists", () => {
-    expect(chipChecked(["pool:default"], IMPLIED, "pool:default")).toBe(true);
+  it("follows the explicit selection", () => {
+    expect(chipChecked(explicit("chain:relay"), POOL, "chain:relay")).toBe(true);
     expect(
-      chipChecked(["pool:default"], IMPLIED, "outbound:psiphon-1.2.3.4"),
+      chipChecked(explicit("chain:relay"), POOL, "outbound:psiphon-1.2.3.4"),
     ).toBe(false);
   });
 
-  it("treats every choice as implied when the picker does not narrow", () => {
-    expect(chipChecked([], CHOICES, "chain:relay")).toBe(true);
+  it("checks a group chip only while every member is selected", () => {
+    expect(
+      chipChecked(
+        explicit("outbound:psiphon-1.2.3.4", "outbound:psiphon-5.6.7.8"),
+        POOL,
+        "pool:default",
+      ),
+    ).toBe(true);
+    expect(
+      chipChecked(explicit("outbound:psiphon-1.2.3.4"), POOL, "pool:default"),
+    ).toBe(false);
   });
 });
 
-describe("toggleChoice", () => {
-  it("unchecks one implied chip into all-minus-one", () => {
-    expect(toggleChoice([], IMPLIED, "outbound:psiphon-5.6.7.8")).toEqual([
-      "outbound:psiphon-1.2.3.4",
-    ]);
+describe("toggleChip", () => {
+  it("turns all-mode off and selects exactly the clicked chip", () => {
+    expect(toggleChip(ALL_SELECTED, POOL, "chain:relay")).toEqual(
+      explicit("chain:relay"),
+    );
   });
 
-  it("adds a non-implied chip to the implied set", () => {
-    expect(toggleChoice([], IMPLIED, "pool:default")).toEqual([
+  it("does not name the rest of the fleet when one chip is clicked", () => {
+    // The whole point of the explicit `all` flag: a click on a 476-outbound
+    // fleet must not materialize the other 475 refs the reader never asked
+    // for. The fleet is a real input here — one chip whose group covers all
+    // 476 — so the assertion below is the invariant it stands for, not a
+    // constant that cannot fail.
+    const fleet = Array.from({ length: 476 }, (_, i) => `outbound:o${i}`);
+    const group: ChipGroup[] = [{ ref: "pool:fleet", members: fleet }];
+    // Clicking a bare outbound chip selects just that ref, even in the same
+    // picker that offers a group covering the whole fleet.
+    const next = toggleChip(ALL_SELECTED, group, "outbound:o0");
+    expect(next).toEqual(explicit("outbound:o0"));
+    expect(next.refs.length).toBeLessThan(fleet.length);
+    // … and clicking the fleet chip is the one thing that does name them all.
+    const all = toggleChip(ALL_SELECTED, group, "pool:fleet");
+    expect(all.refs).toHaveLength(fleet.length);
+  });
+
+  it("adds to and removes from an explicit selection", () => {
+    expect(toggleChip(explicit("chain:relay"), POOL, "pool:default")).toEqual(
+      explicit(
+        "chain:relay",
+        "outbound:psiphon-1.2.3.4",
+        "outbound:psiphon-5.6.7.8",
+      ),
+    );
+    // … and unchecking the last chip reaches the state the caller must refuse.
+    expect(toggleChip(explicit("chain:relay"), POOL, "chain:relay")).toEqual(
+      NONE_SELECTED,
+    );
+  });
+
+  it("selects every member of a pool in one click", () => {
+    expect(toggleChip(NONE_SELECTED, POOL, "pool:default")).toEqual(
+      explicit("outbound:psiphon-1.2.3.4", "outbound:psiphon-5.6.7.8"),
+    );
+  });
+
+  it("remembers the members a pool click left out", () => {
+    // A pool that selects its members must not drop an outbound the reader
+    // checked by hand first.
+    expect(
+      toggleChip(explicit("chain:relay"), POOL, "pool:default"),
+    ).toEqual(
+      explicit(
+        "chain:relay",
+        "outbound:psiphon-1.2.3.4",
+        "outbound:psiphon-5.6.7.8",
+      ),
+    );
+  });
+
+  it("unchecks a whole pool in one click", () => {
+    const sel = explicit(
+      "chain:relay",
       "outbound:psiphon-1.2.3.4",
       "outbound:psiphon-5.6.7.8",
-      "pool:default",
-    ]);
+    );
+    expect(toggleChip(sel, POOL, "pool:default")).toEqual(
+      explicit("chain:relay"),
+    );
   });
 
-  it("toggles within an explicit selection", () => {
-    expect(toggleChoice(["pool:default"], IMPLIED, "chain:relay")).toEqual([
-      "pool:default",
-      "chain:relay",
-    ]);
-    expect(toggleChoice(["pool:default"], IMPLIED, "pool:default")).toEqual([]);
-  });
-
-  it("collapses a selection that covers the implied set exactly", () => {
-    // A materialized copy of "every outbound" would miss outbounds added
-    // later; the empty form stays dynamic.
-    const one = ["outbound:psiphon-1.2.3.4"];
+  it("re-clicking a partially covered group completes it rather than removing", () => {
+    // The chip reads unchecked, so the click has to check it: a toggle keyed on
+    // "anything is selected" would delete the member that was already there.
     expect(
-      toggleChoice(one, IMPLIED, "outbound:psiphon-5.6.7.8"),
-    ).toEqual([]);
+      toggleChip(explicit("outbound:psiphon-1.2.3.4"), POOL, "pool:default"),
+    ).toEqual(
+      explicit("outbound:psiphon-1.2.3.4", "outbound:psiphon-5.6.7.8"),
+    );
+  });
+});
+
+describe("toggleAll", () => {
+  it("unchecking 'every outbound' selects nothing at all", () => {
+    // Not "every outbound minus nothing", and not the fleet spelled out: the
+    // reader asked for the all-mode to stop, and an empty list on the wire
+    // means the opposite, so the caller has to refuse it.
+    expect(toggleAll(ALL_SELECTED)).toEqual(NONE_SELECTED);
+    expect(isNothingSelected(toggleAll(ALL_SELECTED))).toBe(true);
   });
 
-  it("collapses when removing an extra route leaves exactly the implied set", () => {
-    // Dropping "pool:default" from implied+pool leaves a selection that means
-    // the same thing as the all-chip, so it becomes the all-chip again.
+  it("returns to all-mode from an explicit list, dropping it", () => {
+    expect(toggleAll(explicit("chain:relay"))).toEqual(ALL_SELECTED);
+    expect(toggleAll(NONE_SELECTED)).toEqual(ALL_SELECTED);
+  });
+
+  it("says nothing is selected only in that one state", () => {
+    expect(isNothingSelected(ALL_SELECTED)).toBe(false);
+    expect(isNothingSelected(explicit("chain:relay"))).toBe(false);
+    expect(isNothingSelected(NONE_SELECTED)).toBe(true);
+  });
+});
+
+describe("selectionWord", () => {
+  it("reads all-mode as the caller's own phrase", () => {
+    expect(selectionWord(ALL_SELECTED, "every outbound", "route")).toBe(
+      "every outbound",
+    );
+  });
+
+  it("counts an explicit list, and names the empty one", () => {
+    expect(selectionWord(explicit("chain:relay"), "every outbound", "route")).toBe(
+      "1 route",
+    );
     expect(
-      toggleChoice([...IMPLIED, "pool:default"], IMPLIED, "pool:default"),
-    ).toEqual([]);
+      selectionWord(
+        explicit("chain:relay", "direct"),
+        "every outbound",
+        "route",
+      ),
+    ).toBe("2 routes");
+    // Zero would read as "0 routes" in a pill, which is a count of something
+    // rather than the unfinished form it is.
+    expect(selectionWord(NONE_SELECTED, "every outbound", "route")).toBe(
+      "no routes",
+    );
   });
+});
 
-  it("keeps an extra route that the collapse would not cover", () => {
-    const one = [...IMPLIED.slice(0, 1), "pool:default"];
-    expect(
-      toggleChoice(one, IMPLIED, "outbound:psiphon-5.6.7.8"),
-    ).toEqual(["outbound:psiphon-1.2.3.4", "pool:default", "outbound:psiphon-5.6.7.8"]);
-  });
-
-  it("materializes a large all-mode into every chip but the one unchecked", () => {
-    // A real fleet: unchecking one chip has to name the rest explicitly, in
-    // order, because that is the only way to say "all but this one" on the
-    // wire — and it is what makes the engine's route cap reachable from here
-    // (see probeRoundProblem).
-    const implied = Array.from({ length: 476 }, (_, i) => `outbound:o${i}`);
-    const next = toggleChoice([], implied, "outbound:o0");
-    expect(next).toHaveLength(475);
-    expect(next).toEqual(implied.slice(1));
-    // … and re-checking the one that was dropped says "every outbound" again
-    // rather than leaving a frozen list of 475 behind.
-    expect(toggleChoice(next, implied, "outbound:o0")).toEqual([]);
-  });
-
-  it("does not collapse onto an empty implied set", () => {
-    // With no outbounds built, "every outbound" covers nothing — an explicit
-    // pick of the only route stays explicit rather than snapping back to a
-    // form that means "nothing at all".
-    expect(toggleChoice([], [], "direct")).toEqual(["direct"]);
-  });
-
-  it("unchecking the last chip returns to all-mode", () => {
-    // The wire has no "probe nothing": an empty list means every implied
-    // choice. One chip implied, unchecked, leaves nothing to express.
-    expect(toggleChoice([], ["outbound:solo"], "outbound:solo")).toEqual([]);
+describe("nothingSelectedProblem", () => {
+  it("blocks, and says why an empty list is not the answer", () => {
+    const problem = nothingSelectedProblem("route", "every outbound");
+    expect(problem.blocked).toBe(true);
+    expect(problem.message).toContain("No route selected");
+    expect(problem.message).toContain("every outbound");
+    // The reason matters: the engine reads an omitted or empty `routes` as
+    // every built outbound, so sending this form would probe the fleet the
+    // reader just unchecked.
+    expect(problem.message).toContain("would mean every one of them");
   });
 });

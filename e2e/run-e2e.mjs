@@ -41,6 +41,29 @@ async function api(path) {
   return res.json();
 }
 
+// Helper: write engine state the same way, for the fixtures a test needs the
+// UI to have something to look at. Returns the body on success and asserts the
+// status, so a fixture that failed to seed fails the test that asked for it
+// rather than the assertion that depended on it.
+async function apiPost(path, body) {
+  const res = await page.request.post(`${BASE}/api/${path.replace(/^\//, "")}`, {
+    data: body,
+  });
+  assert.ok(
+    res.status() === 200 || res.status() === 201,
+    `POST /api/${path} -> ${res.status()}`,
+  );
+  return res.status() === 204 ? null : res.json();
+}
+
+async function apiDelete(path) {
+  const res = await page.request.delete(`${BASE}/api/${path.replace(/^\//, "")}`);
+  assert.ok(
+    res.status() === 200 || res.status() === 204,
+    `DELETE /api/${path} -> ${res.status()}`,
+  );
+}
+
 // Helper: one real request through the engine's HTTP inbound.
 //
 // The request-target has to be ABSOLUTE-form (`GET http://host/path`). With an
@@ -392,6 +415,200 @@ await test("pool form shows selector and filter examples while configuring", asy
   await page.waitForSelector("#pool-id", { state: "detached", timeout: 5_000 });
 });
 
+await test("outbound editor opens inline under its row, not at the top", async () => {
+  // "Under its row" needs a row after it to mean anything: with the single
+  // outbound the CI fixture declares, an editor appended to the end of the
+  // tbody would also sit "under" that row. So the test seeds a second one and
+  // takes it away again whatever happens below.
+  const fixture = "e2e-inline-editor-row";
+  await apiPost("outbounds", { id: fixture, protocol: "direct", config: {} });
+  try {
+    await page.goto(`${BASE}/outbounds`, { waitUntil: "networkidle" });
+    const outbounds = await api("outbounds");
+    assert.ok(outbounds.length >= 2, "the fixture outbound did not reach the engine");
+    const id = outbounds[0].id;
+    const row = `table.data tbody tr:not(.editor-row):has-text('${id}')`;
+
+    await page.locator(`${row} button:has-text('Edit')`).click();
+    // The editor belongs to the row: it renders in a full-width cell directly
+    // under it, and the row itself is marked as the one being edited. The
+    // sibling combinator is what pins "directly under" — the fixture row is
+    // there to be between them if it is not.
+    const editor = page.locator(`table.data tbody tr.editor-row .form-inline`);
+    await editor.waitFor({ timeout: 5_000 });
+    assert.equal(await editor.count(), 1, "more than one inline editor opened");
+    assert.equal(
+      await page.locator(`${row}.editing`).count(),
+      1,
+      `row ${id} is not marked as editing`,
+    );
+    assert.equal(
+      await page.locator("table.data tbody tr.editing + tr.editor-row").count(),
+      1,
+      "the editor row does not sit directly under the row it edits",
+    );
+    // Nothing at the top of the page: a create has no row to sit under, so the
+    // card variant is for creates — an edit that renders there too would be the
+    // behaviour this test exists to rule out. `role="region"` is FormCard's own
+    // marker; the table's wrapper is a plain .card, and while an editor is open
+    // inline that wrapper does contain #out-id.
+    const topCard = page.locator(`main .card[role="region"]:has(#out-id)`);
+    assert.equal(
+      await topCard.count(),
+      0,
+      "editing opened the top-of-page card instead of the row",
+    );
+    // The editor is under the row it edits, not above it.
+    const rowBox = await page.locator(row).first().boundingBox();
+    const editorBox = await editor.boundingBox();
+    assert.ok(rowBox && editorBox, "row or editor has no box");
+    assert.ok(
+      editorBox.y > rowBox.y,
+      `inline editor at y=${editorBox.y} is not under its row at y=${rowBox.y}`,
+    );
+    assert.equal(
+      await page.locator(`${row} button[aria-expanded="true"]`).count(),
+      1,
+      "the edited row's Edit button does not report itself expanded",
+    );
+
+    // The draft still holds what the engine has, so saving writes it straight
+    // back. Saving is also the only way this test can prove the inline form
+    // submits at all: the <form> lives inside a full-width <td>, and nothing
+    // else here would notice if the wiring were lost there.
+    assert.equal(await page.locator("#out-id").inputValue(), id);
+    const saved = outbounds.find((o) => o.id === id);
+    await editor.locator("form button:has-text('Save')").click();
+    await page.waitForSelector("table.data tbody tr.editor-row", {
+      state: "detached",
+      timeout: 5_000,
+    });
+    assert.equal(
+      await page.locator("table.data tbody tr.editor-row").count(),
+      0,
+      "saving left the editor row behind",
+    );
+    const after = await api("outbounds");
+    const kept = after.find((o) => o.id === id);
+    assert.ok(kept, `saving lost ${id}`);
+    assert.equal(kept.protocol, saved.protocol, "saving changed the protocol");
+
+    // Reopen to walk the close path: OutboundsPage hands FormCard `dirty`
+    // unconditionally, so cancelling is two-step — Cancel arms, the armed
+    // button confirms.
+    await page.locator(`${row} button:has-text('Edit')`).click();
+    await editor.waitFor({ timeout: 5_000 });
+    await editor.locator("form button:has-text('Cancel')").click();
+    await editor.locator("form button:has-text('Discard changes?')").click();
+    await page.waitForSelector(`#out-id`, { state: "detached", timeout: 5_000 });
+    assert.equal(
+      await page.locator("table.data tbody tr.editor-row").count(),
+      0,
+      "cancelling left the editor row behind",
+    );
+
+    // A create has no row, so it stays the card at the top — and it must not
+    // take a row with it.
+    await page.click("button:has-text('New outbound')");
+    const card = topCard;
+    await card.waitFor({ timeout: 5_000 });
+    assert.equal(
+      await page.locator("table.data tbody tr.editor-row").count(),
+      0,
+      "a create rendered an inline editor",
+    );
+    await card.locator("form button:has-text('Cancel')").click();
+    await card.locator("form button:has-text('Discard changes?')").click();
+    await page.waitForSelector(`#out-id`, { state: "detached", timeout: 5_000 });
+  } finally {
+    await apiDelete(`outbounds/${fixture}`);
+  }
+});
+
+await test("chain layers are picked from the engine's pools and outbounds", async () => {
+  await page.goto(`${BASE}/chains`, { waitUntil: "networkidle" });
+  const [pools, outbounds] = [await api("pools"), await api("outbounds")];
+  const poolIds = pools.map((p) => p.id).filter(Boolean);
+  const outboundIds = outbounds.map((o) => o.id).filter(Boolean);
+  if (poolIds.length === 0 && outboundIds.length === 0) return; // nothing to pick
+
+  const id = `e2e-chain-${Date.now()}`;
+  await page.click("button:has-text('New chain')");
+  await page.locator("#chain-id").fill(id);
+
+  // A layer is a picker, not a text input: the point is that the reader cannot
+  // type an id the engine has nothing behind.
+  await page.click("button:has-text('Add layer')");
+  const layer = page.locator("#chain-layers");
+  await layer.waitFor({ timeout: 5_000 });
+  assert.equal(
+    await page.locator(".arr-editor:has(#chain-layers) select").count(),
+    1,
+    "the layer row is not a select",
+  );
+  assert.equal(
+    await page.locator(".arr-editor:has(#chain-layers) input[type=text]").count(),
+    0,
+    "the layer row still offers a text input",
+  );
+
+  // The choices are the engine's own, grouped, so the reader can tell a pool
+  // from an outbound — the value is a bare id either way.
+  const optionValues = await layer.locator("option").evaluateAll((opts) =>
+    opts.map((o) => o.value),
+  );
+  const groupLabels = await layer.locator("optgroup").evaluateAll((gs) =>
+    gs.map((g) => g.getAttribute("label")),
+  );
+  for (const pid of poolIds) {
+    assert.ok(optionValues.includes(pid), `pool ${pid} is not a layer choice`);
+  }
+  // An outbound whose id is also a pool's is shadowed by that pool — the engine
+  // resolves it to the pool, so offering both would offer a choice that does
+  // not exist.
+  const poolSet = new Set(poolIds);
+  for (const oid of outboundIds.filter((o) => !poolSet.has(o))) {
+    assert.ok(optionValues.includes(oid), `outbound ${oid} is not a layer choice`);
+  }
+  assert.ok(groupLabels.includes("Pools") || poolIds.length === 0, "no Pools group");
+  assert.ok(
+    groupLabels.includes("Outbounds") ||
+      outboundIds.filter((o) => !poolSet.has(o)).length === 0,
+    "no Outbounds group",
+  );
+
+  // Pick the pool when there is one, else the first outbound, and save it.
+  const picked = poolIds[0] ?? outboundIds[0];
+  await layer.selectOption(picked);
+  await page.click("form button:has-text('Save')");
+  await page.waitForSelector(`tr:has-text('${id}')`, { timeout: 5_000 });
+  const after = await api("chains");
+  const saved = after.find((c) => c.id === id);
+  assert.ok(saved, "created chain missing from engine");
+  assert.deepEqual(saved.layers, [picked], `chain saved layers ${saved.layers}`);
+
+  // Editing it back keeps the stored layer selected — a select whose value
+  // matches no option renders blank, and saving that would silently shorten
+  // the chain.
+  await page
+    .locator(`table.data tbody tr:not(.editor-row):has-text('${id}') button:has-text('Edit')`)
+    .click();
+  await page.locator("#chain-layers").waitFor({ timeout: 5_000 });
+  assert.equal(
+    await page.locator("#chain-layers").inputValue(),
+    picked,
+    "editing lost the stored layer",
+  );
+  // ChainsPage passes FormCard `dirty` unconditionally, so Cancel is two-step.
+  await page.click("form button:has-text('Cancel')");
+  await page.click("form button:has-text('Discard changes?')");
+  await page.waitForSelector("#chain-layers", { state: "detached", timeout: 5_000 });
+
+  await confirmDelete(`tr:has-text('${id}')`);
+  const final = await api("chains");
+  assert.ok(!final.some((c) => c.id === id), "deleted chain still on engine");
+});
+
 await test("metrics page renders the dashboard", async () => {
   // Premise guard, checked rather than assumed: every "no proxy node"
   // assertion below only holds if the engine has no proxy outbound to ride.
@@ -587,20 +804,21 @@ await test("probe page renders the run form and a history or an explanation", as
   );
 });
 
-await test("probe routes: every outbound reads as checked and can be trimmed", async () => {
+await test("probe routes: 'every outbound' unchecks everything, and a pool selects its members", async () => {
   await page.goto(`${BASE}/probes`, { waitUntil: "networkidle" });
   const group = '[aria-labelledby="probe-routes-label"]';
   const chipSel = (ref) => `${group} label.chip:has(span:text-is("${ref}"))`;
   const allSel = `${group} label.chip:has-text("every outbound")`;
   const pill = page.locator(".card-head .pill").first();
+  const notice = page.locator(`${group} + .notice, .field:has(${group}) .notice`).first();
+  const runBtn = page.locator("main button.primary:has-text('Probe now')");
 
   const outbounds = await api("outbounds");
   assert.ok(outbounds.length > 0, "engine reports no outbounds to probe");
   const firstOut = `outbound:${outbounds[0].id}`;
-  // The extra chip that all-mode does not cover. "direct" is always offered
+  // The route the all-mode never covers: "direct" is always offered
   // (ProbesPage appends it to the route list) and no outbound chip can collide
-  // with it — those render as "outbound:<id>" — so this needs no pool, and an
-  // engine with only outbounds still exercises the trimming path.
+  // with it — those render as "outbound:<id>".
   const extra = "direct";
 
   // Past FILTER_AT the picker hides unmatched chips behind its filter box, so
@@ -619,108 +837,137 @@ await test("probe routes: every outbound reads as checked and can be trimmed", a
   const checked = async (sel) =>
     (await page.locator(sel).count()) > 0 &&
     (await page.locator(`${sel} input`).first().isChecked());
-  // The card-head pill words the round as the form holds it, and is the one
-  // place that shows a large materialized selection at a glance — past the
-  // picker's pin threshold none of those chips are on screen.
-  const pillRoutes = (n) => `${n} route${n === 1 ? "" : "s"}`;
+  // Count the checked chips in the box. With nothing selected no chip can
+  // render as `.on` whether or not a filter is applied — chipChecked answers
+  // from an empty ref list — so this count holds past FILTER_AT too, where the
+  // DOM shows filter-matched chips only. A large SELECTION is what the DOM
+  // cannot show, and there the pill (an exact count) carries the invariant.
+  const checkedCount = async () =>
+    await page.locator(`${group} .chip-scroll label.chip.on`).count();
 
   await page.waitForSelector(chipSel(firstOut), { timeout: 10_000 });
 
-  // The hint states the caps the trimming affordance can run into, so the
-  // reader learns them before the picker hits them. (It sits beside the group,
-  // not inside it — FieldGroup renders hint as a sibling of the role=group.)
-  assert.match(
-    await page
-      .locator(`.field:has(${group}) > .field-hint`)
-      .first()
-      .innerText(),
-    /128 routes and 512 requests/,
-    "route hint lost the engine's caps",
-  );
+  // The hint states the caps the picker can run into, so the reader learns
+  // them before the round hits them. (It sits beside the group, not inside it —
+  // FieldGroup renders hint as a sibling of the role=group.) The route cap is
+  // 65535: naming a fleet is legal, and it is the 512-request fan-out that
+  // decides whether the round can run.
+  const hint = await page
+    .locator(`.field:has(${group}) > .field-hint`)
+    .first()
+    .innerText();
+  assert.match(hint, /512 requests/, "route hint lost the fan-out cap");
+  assert.match(hint, /65535 routes/, "route hint lost the engine's route cap");
 
-  // A fresh form selects nothing, which on the wire means "every outbound":
-  // the engine expands an empty route list to the built outbounds ONLY, so
-  // outbound chips read as checked under the all-chip — and a pool or the
-  // literal "direct" route, which the expansion never covers, does not.
+  // A fresh form is in all-mode: the all-chip is on, and NO individual chip
+  // reads as checked. The round's own set is the engine's to enumerate — the
+  // BUILT outbounds, which no endpoint reports — so checking them would
+  // promise a list the round may not match.
   assert.ok(await checked(allSel), "all-chip not checked on a fresh form");
   assert.match(await pill.innerText(), /every outbound/, "pill does not say every outbound");
+  for (const ref of [firstOut, extra]) {
+    await reveal(ref);
+    assert.equal(
+      await checked(chipSel(ref)),
+      false,
+      `${ref} checked under "every outbound"`,
+    );
+  }
+
+  // Unchecking "every outbound" unselects everything. This is the state the
+  // wire cannot carry — an empty `routes` list means all-mode to the engine —
+  // so the page refuses the round instead of sending it.
+  await page.locator(`${allSel} input`).click();
+  await page.waitForSelector(`${allSel}.on`, { state: "detached", timeout: 5_000 });
+  assert.match(await pill.innerText(), /no routes/, "pill does not say no routes");
+  const nothing = await notice.innerText();
+  assert.match(nothing, /No route selected/, `notice does not explain: ${nothing}`);
+  assert.ok(await runBtn.isDisabled(), "'Probe now' still enabled with nothing selected");
+  // Not one chip anywhere in the box. The all-chip renders in its own grid,
+  // so this selector counts individual chips only — and with nothing selected
+  // every one of them reads unchecked even past FILTER_AT, where the DOM holds
+  // the filter's matches rather than the whole fleet.
+  assert.equal(await checkedCount(), 0, "unchecking all-mode left a chip checked");
+
+  // One click selects exactly that chip — not the fleet around it.
+  await click(extra);
+  await page.waitForSelector(`${chipSel(extra)}.on`, { timeout: 5_000 });
+  assert.equal(await checked(chipSel(extra)), true, "clicking a chip did not check it");
+  assert.match(await pill.innerText(), /1 route$/, "pill does not count one route");
+  assert.ok(await runBtn.isEnabled(), "'Probe now' disabled with one route selected");
   for (const o of outbounds.slice(0, 5)) {
     await reveal(`outbound:${o.id}`);
-    assert.ok(
-      await checked(chipSel(`outbound:${o.id}`)),
-      `outbound:${o.id} not checked under "every outbound"`,
-    );
-  }
-  await reveal(extra);
-  assert.ok(await checked(chipSel(extra)) === false, `"${extra}" checked under every outbound`);
-
-  // Checking a chip the all-mode does not cover materializes the implied set
-  // plus that chip — the picker leaves all-mode.
-  await click(extra);
-  await page.waitForSelector(`${allSel}.on`, { state: "detached", timeout: 5_000 });
-  await reveal(firstOut);
-  assert.ok(await checked(chipSel(firstOut)), "materializing dropped an implied outbound");
-  assert.match(
-    await pill.innerText(),
-    new RegExp(`${pillRoutes(outbounds.length + 1)}$`),
-    "pill does not count the materialized round",
-  );
-
-  // Unchecking one outbound trims it from the round; the others stay in.
-  await click(firstOut);
-  await page.waitForSelector(`${chipSel(firstOut)}.on`, {
-    state: "detached",
-    timeout: 5_000,
-  });
-  await reveal(extra);
-  assert.ok(await checked(chipSel(extra)), "trimming one outbound dropped the extra route");
-  await reveal(firstOut);
-  for (const o of outbounds.slice(1, 5)) {
-    const ref = `outbound:${o.id}`;
-    await reveal(ref);
-    assert.ok(await checked(chipSel(ref)), `trimming one outbound dropped ${ref}`);
-  }
-  assert.match(
-    await pill.innerText(),
-    new RegExp(`${pillRoutes(outbounds.length)}$`),
-    "pill did not follow the trim",
-  );
-
-  // The loop above walks at most four "others", so on a single-outbound engine
-  // — CI's fixture — it runs zero iterations and proves nothing about the trim
-  // staying scoped to the one chip. Where the picker has no filter box it
-  // renders every chip, so count the checked ones directly instead: the
-  // remaining outbounds plus the extra route, and nothing else. Past
-  // FILTER_AT the DOM holds filter-matched chips only (visibleChoices does not
-  // pin a large selection), so the count is meaningless there and the pill —
-  // an exact count of a materialized selection — carries the invariant alone.
-  if ((await filterBox.count()) === 0) {
-    const on = await page.locator(`${group} .chip-scroll label.chip.on`).count();
-    const remainingOutbounds = outbounds.length - 1; // firstOut was trimmed
-    const extraRoute = 1; // the chip all-mode never covers
     assert.equal(
-      on,
-      remainingOutbounds + extraRoute,
-      "trim did not leave the other chips checked",
+      await checked(chipSel(`outbound:${o.id}`)),
+      false,
+      `one click selected ${o.id} too`,
     );
   }
 
-  // Putting the trimmed chip back and then dropping the extra leaves exactly
-  // the implied set, which collapses back to the all-chip — the round stays
-  // dynamic instead of pinning a materialized copy of "every outbound" into
-  // the spec. (Done in that order because the collapse fires on whatever the
-  // selection happens to equal at the moment of the click.)
-  await click(firstOut);
-  await reveal(firstOut);
-  assert.ok(await checked(chipSel(firstOut)), "re-checking the trimmed outbound did not take");
-  await click(extra);
-  await page.waitForSelector(`${allSel}.on`, { timeout: 5_000 });
-  await reveal(firstOut);
-  assert.ok(
-    await checked(chipSel(firstOut)),
-    "collapse did not leave the implied set checked",
+  // A pool chip selects ALL of that pool's outbounds, because probing through
+  // "pool:…" itself rides whichever member the selector picks — one click has
+  // to name the members for the round to say anything about the pool.
+  const pools = (await api("pools")).filter(
+    (p) => Array.isArray(p.outbound_ids) && p.outbound_ids.length > 0,
   );
+  if (pools.length > 0) {
+    const pool = pools[0];
+    const poolRef = `pool:${pool.id}`;
+    // Members the engine has configured; ProbesPage drops refs to ids that are
+    // not in /api/outbounds, so a pool naming a deleted outbound is skipped —
+    // and it counts a repeated id once, matching the dedupe the page applies.
+    const members = [...new Set(pool.outbound_ids.map((id) => `outbound:${id}`))];
+    const configured = new Set(outbounds.map((o) => `outbound:${o.id}`));
+    const live = members.filter((m) => configured.has(m));
+    assert.ok(live.length > 0, `${poolRef} has no configured member to select`);
+
+    // Clear the explicit list first, so the click is the pool's alone.
+    await click(extra);
+    await page.waitForSelector(`${chipSel(extra)}.on`, { state: "detached", timeout: 5_000 });
+
+    await click(poolRef);
+    await page.waitForSelector(`${chipSel(poolRef)}.on`, { timeout: 5_000 });
+    for (const m of live) {
+      await reveal(m);
+      assert.equal(await checked(chipSel(m)), true, `${poolRef} did not select ${m}`);
+    }
+    // The chip says what one click on it commits to, so a pool of 40 does not
+    // read as one route among hundreds.
+    //
+    // Re-reveal the pool chip first: the member checks above left the filter on
+    // a member ref, and past FILTER_AT a selection is pinned into the filtered
+    // view only by its own refs — which are the MEMBERS, never the pool chip.
+    // Without this, on a fleet the pool chip is not in the DOM at all and the
+    // badge read times out instead of reporting a wrong count.
+    await reveal(poolRef);
+    const badge = page.locator(`${chipSel(poolRef)} .chip-count`);
+    assert.equal(
+      await badge.innerText(),
+      String(live.length),
+      `${poolRef} does not show its member count`,
+    );
+    assert.match(
+      await pill.innerText(),
+      new RegExp(`${live.length} route${live.length === 1 ? "" : "s"}$`),
+      "pill does not count the pool's members",
+    );
+    // … and one more click takes them all back out, leaving nothing selected.
+    // (`click` reveals the chip first, so the filter the member loop left on a
+    // member ref cannot hide it.)
+    await click(poolRef);
+    await page.waitForSelector(`${chipSel(poolRef)}.on`, { state: "detached", timeout: 5_000 });
+    assert.ok(await runBtn.isDisabled(), "'Probe now' enabled after unselecting the pool");
+  }
+
+  // Checking the all-chip returns to all-mode and drops the explicit list:
+  // a materialized copy would miss outbounds added later.
+  await click(extra);
+  await page.locator(`${allSel} input`).click();
+  await page.waitForSelector(`${allSel}.on`, { timeout: 5_000 });
   assert.match(await pill.innerText(), /every outbound/, "pill did not return to all-mode");
+  await reveal(extra);
+  assert.equal(await checked(chipSel(extra)), false, "all-mode left a chip checked");
+  assert.ok(await runBtn.isEnabled(), "'Probe now' disabled in all-mode");
 });
 
 await test("a probe run answers, or explains why it cannot", async () => {

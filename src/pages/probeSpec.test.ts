@@ -3,6 +3,7 @@
 // request leaves the browser.
 
 import { describe, expect, it } from "vitest";
+import { ALL_SELECTED, NONE_SELECTED } from "../components/ChipPicker";
 import {
   buildExpectations,
   buildProbeSpec,
@@ -25,6 +26,7 @@ import {
   probeRoundProblem,
   PROBE_CAPS,
   PROBE_TARGET_PRESETS,
+  selectionFromStored,
   type ProbeSpecFields,
 } from "./probeSpec";
 
@@ -452,7 +454,7 @@ describe("buildProbeSpec", () => {
     method: "GET",
     headers: [],
     body: "",
-    routes: [],
+    routes: ALL_SELECTED,
     timeoutSec: 0,
     maxBodyBytes: 0,
   };
@@ -474,7 +476,7 @@ describe("buildProbeSpec", () => {
         method: "post",
         headers: [{ name: "X-Token", value: "t" }],
         body: '{"a":1}',
-        routes: ["pool:relays", "direct"],
+        routes: { all: false, refs: ["pool:relays", "direct"] },
         timeoutSec: 12,
         maxBodyBytes: 4096,
       }),
@@ -489,6 +491,28 @@ describe("buildProbeSpec", () => {
     });
   });
 
+  it("sends all-mode as an omitted list, and nothing-selected as all-mode", () => {
+    // The wire has no "no routes": [] means every built outbound. So a
+    // nothing-selected form reaching buildProbeSpec degrades to all-mode —
+    // which is exactly why every caller gates on probeRoundProblem first.
+    expect(
+      buildProbeSpec({ ...empty, targets: ["https://a"], routes: NONE_SELECTED })
+        .routes,
+    ).toBeUndefined();
+  });
+
+  it("cleans the route list the way the targets are cleaned", () => {
+    // A repeated ref is a route the engine runs once anyway — probeRoutes
+    // trims and dedupes — so sending it would only overstate the round's size.
+    expect(
+      buildProbeSpec({
+        ...empty,
+        targets: ["https://a"],
+        routes: { all: false, refs: [" outbound:a ", "outbound:a", "", "direct"] },
+      }).routes,
+    ).toEqual(["outbound:a", "direct"]);
+  });
+
   it("drops a body the method cannot carry", () => {
     const spec = buildProbeSpec({ ...empty, targets: ["https://a"], method: "GET", body: "x" });
     expect(spec.body).toBeUndefined();
@@ -498,62 +522,132 @@ describe("buildProbeSpec", () => {
   });
 });
 
-describe("probeRoundProblem", () => {
-  const routes = (n: number) => Array.from({ length: n }, (_, i) => `outbound:o${i}`);
-
-  it("allows a round inside both caps", () => {
-    expect(probeRoundProblem(routes(PROBE_CAPS.maxRoutes), 1, 0)).toBeNull();
-    expect(probeRoundProblem(routes(3), 2, 0)).toBeNull();
-    // The fan-out cap is a product, so it is reached exactly at 512 requests.
-    expect(
-      probeRoundProblem(routes(PROBE_CAPS.maxRoutes), PROBE_CAPS.maxFanout / PROBE_CAPS.maxRoutes, 0),
-    ).toBeNull();
+describe("selectionFromStored", () => {
+  it("reads an absent or empty stored list as all-mode", () => {
+    // That is what the engine stores for "every built outbound", and
+    // nothing-selected cannot be stored at all — so [] can only mean all-mode.
+    expect(selectionFromStored(undefined)).toEqual(ALL_SELECTED);
+    expect(selectionFromStored([])).toEqual(ALL_SELECTED);
   });
 
-  it("blocks one route past the route cap — an exact list is exact", () => {
-    const problem = probeRoundProblem(routes(PROBE_CAPS.maxRoutes + 1), 1, 0);
+  it("reads a null stored list as all-mode, not as a crash", () => {
+    // `config.HTTPProbeConfig` stores every field (no `omitempty`), so a
+    // schedule saved in all-mode — which omits the list — serves back
+    // `"routes": null`, and the page hands it straight here. Reading `.length`
+    // off it would throw during render and blank the whole page.
+    expect(selectionFromStored(null)).toEqual(ALL_SELECTED);
+  });
+
+  it("reads a stored list back as exactly those refs", () => {
+    expect(selectionFromStored(["pool:relays", "direct"])).toEqual({
+      all: false,
+      refs: ["pool:relays", "direct"],
+    });
+  });
+});
+
+describe("probeRoundProblem", () => {
+  const routes = (n: number) => ({
+    all: false,
+    refs: Array.from({ length: n }, (_, i) => `outbound:o${i}`),
+  });
+
+  it("allows a round inside both caps", () => {
+    expect(probeRoundProblem(routes(3), 2, 0)).toBeNull();
+    // The fan-out cap is a product, so it is reached exactly at 512 requests.
+    expect(probeRoundProblem(routes(PROBE_CAPS.maxFanout), 1, 0)).toBeNull();
+    expect(probeRoundProblem(routes(256), 2, 0)).toBeNull();
+  });
+
+  it("judges a long list by the work it asks for, not by its length", () => {
+    // 600 named routes with 10 targets breaches the fan-out, and the message
+    // says so — the 65535-route cap is nowhere near, and mentioning it would
+    // tell the reader to shorten a list the round would have refused anyway.
+    const problem = probeRoundProblem(routes(600), 10, 0);
     expect(problem?.blocked).toBe(true);
-    expect(problem?.message).toContain(String(PROBE_CAPS.maxRoutes));
+    expect(problem?.message).toContain("6000 requests");
+    expect(problem?.message).not.toContain(String(PROBE_CAPS.maxRoutes));
   });
 
   it("blocks one request past the fan-out cap", () => {
-    // 128 routes × 5 targets = 640, over 512, with the route count legal.
-    const problem = probeRoundProblem(routes(PROBE_CAPS.maxRoutes), 5, 0);
+    // 512 routes × 2 targets = 1024, over 512, with the route count legal.
+    const problem = probeRoundProblem(routes(PROBE_CAPS.maxFanout), 2, 0);
     expect(problem?.blocked).toBe(true);
     expect(problem?.message).toContain(String(PROBE_CAPS.maxFanout));
-    expect(problem?.message).toContain("640");
+    expect(problem?.message).toContain("1024");
   });
 
   it("reports the route cap first, the way the engine does", () => {
-    // RunHTTPProbes checks the route list before it multiplies, so a list of
-    // 129 with 10 targets must not read as a fan-out complaint.
+    // RunHTTPProbes checks the route list before it multiplies, so a list one
+    // ref past 65535 with 10 targets must not read as a fan-out complaint —
+    // even though 655360 requests is over that cap too.
     const problem = probeRoundProblem(routes(PROBE_CAPS.maxRoutes + 1), 10, 0);
-    expect(problem?.message).toContain("129 routes");
+    expect(problem?.blocked).toBe(true);
+    expect(problem?.message).toContain(`${PROBE_CAPS.maxRoutes + 1} routes`);
+    expect(problem?.message).toContain(String(PROBE_CAPS.maxRoutes));
+  });
+
+  it("blocks one pool click that names more than a round can run", () => {
+    // The case the picker makes easy: a pool chip selects every member, so a
+    // 600-outbound pool is 600 exact routes — 600 requests against one target,
+    // over the fan-out. Exact list, exact arithmetic, so the button refuses.
+    const problem = probeRoundProblem(routes(600), 1, 0);
+    expect(problem?.blocked).toBe(true);
+    expect(problem?.message).toContain("600");
+  });
+
+  it("blocks nothing-selected outright, estimate or not", () => {
+    // Unchecking "every outbound" leaves a form with no wire representation;
+    // the configured-fleet estimate must not quietly stand in for a selection.
+    const problem = probeRoundProblem(NONE_SELECTED, 1, 476);
+    expect(problem?.blocked).toBe(true);
+    expect(problem?.message).toContain("No route selected");
+  });
+
+  it("counts a repeated ref once, the way probeRoutes runs it", () => {
+    // A stored spec (hand-written YAML) or a pool that names one outbound
+    // twice arrives as a list with a repeat. `probeRoutes` trims and drops
+    // repeats before the caps are checked, so counting the list verbatim would
+    // refuse a round the engine runs — here 513 refs that are 512 routes.
+    const fanout = PROBE_CAPS.maxFanout;
+    const refs = Array.from({ length: fanout + 1 }, (_, i) => `outbound:o${i % fanout}`);
+    expect(refs).toHaveLength(fanout + 1);
+    expect(probeRoundProblem({ all: false, refs }, 1, 0)).toBeNull();
+    // One target more and the same list is genuinely over: the dedupe is not a
+    // blanket waiver.
+    expect(probeRoundProblem({ all: false, refs }, 2, 0)?.blocked).toBe(true);
   });
 
   it("warns, without blocking, when all-mode rests on an estimate", () => {
     // An empty list expands server-side over the BUILT outbounds; the caller's
     // count is the CONFIGURED ones, an upper bound it cannot verify. So a
-    // 476-outbound fleet is worth warning about, but not worth disabling the
-    // button over: some of those may have failed to build.
-    const problem = probeRoundProblem([], 1, 476);
+    // 476-outbound fleet against two targets is worth warning about — 952
+    // requests, over the fan-out — but not worth disabling the button over:
+    // some of those may have failed to build.
+    const problem = probeRoundProblem(ALL_SELECTED, 2, 476);
     expect(problem).not.toBeNull();
     expect(problem?.blocked).toBe(false);
     expect(problem?.message).toContain("476");
+    expect(problem?.message).toContain("952");
     expect(problem?.message.toLowerCase()).toContain("cannot see");
+    // The route cap is an estimate too, now that it sits at 65535: a
+    // configured fleet that big is warned about, never refused here.
+    const huge = probeRoundProblem(
+      ALL_SELECTED,
+      1,
+      PROBE_CAPS.maxRoutes + 1,
+    );
+    expect(huge?.blocked).toBe(false);
+    expect(huge?.message).toContain(String(PROBE_CAPS.maxRoutes));
   });
 
   it("stays quiet in all-mode inside the estimate", () => {
-    expect(probeRoundProblem([], 1, PROBE_CAPS.maxRoutes)).toBeNull();
+    // 476 configured outbounds against one target is inside the fan-out, so
+    // the fleet that used to trip a 128-route cap now simply runs.
+    expect(probeRoundProblem(ALL_SELECTED, 1, 476)).toBeNull();
+    expect(probeRoundProblem(ALL_SELECTED, 1, PROBE_CAPS.maxFanout)).toBeNull();
     // Nothing loaded yet is not a fleet of zero routes.
-    expect(probeRoundProblem([], 1, 0)).toBeNull();
-  });
-
-  it("blocks trimming a fleet past the cap — the case the picker makes easy", () => {
-    // 476 outbounds; unchecking one chip materializes the other 475.
-    const implied = routes(476);
-    const trimmed = implied.filter((r) => r !== "outbound:o0");
-    expect(probeRoundProblem(trimmed, 1, implied.length)?.blocked).toBe(true);
+    expect(probeRoundProblem(ALL_SELECTED, 1, 0)).toBeNull();
   });
 });
 

@@ -18,9 +18,11 @@
 // so a .tsx component cannot be tested at all, and nothing that can be wrong
 // belongs in one.
 //
-// No graph-drawing library and no row expansion: `DataTable` has neither a
-// colSpan nor an expandable row, and the established idiom for detail inside a
-// cell is a <details> — see `ResponseDetail` in ProbesPage.
+// No graph-drawing library and no row expansion: the idiom for detail inside a
+// cell is a <details> — see `ResponseDetail` in ProbesPage — and a path belongs
+// to its own row, not to a row opened up under it. (`DataTable` does have an
+// expanded row now, via `editor`; it is for an edit form, not read-only
+// detail.)
 
 import { Fragment } from "react";
 import { formatDuration } from "../format";

@@ -1,24 +1,28 @@
 // src/components/ChipPicker.tsx — the "all of them, or these" multi-select the
-// exit-check run card and the probe run card both offer. Nothing selected is a
-// real choice ("every outbound"), not an empty form, so it gets its own chip.
+// exit-check run card and the probe run card both offer.
 //
-// What the all-chip stands for on the wire is its IMPLIED set: the choices an
-// empty selection covers. By default that is every choice — the exit-check's
-// "every outbound" names every id in its list — but a caller can narrow it:
-// the engine expands an empty probe-route list to the built outbounds only, so
-// the probe page passes just its outbound:* refs and a pool, chain or "direct"
-// chip honestly renders unchecked under "every outbound". An explicit empty
-// implied set is the other end of that: nothing renders checked under the
-// all-chip, and a click pins exactly one chip. That is what a caller passes
-// when the engine's own all-mode covers a set it cannot enumerate —
-// ExitChecksPage, where the engine skips address-less outbounds before it ever
-// looks at the selection.
+// "Every one of them" is a real choice, not an empty form, so it gets its own
+// chip — and it is a real toggle: unchecking it leaves nothing selected, which
+// is a state the caller has to refuse rather than send. Both wire formats this
+// picker feeds (a probe's `routes`, an exit-check run's `outbounds`) read an
+// empty list as "every one of them", so "nothing selected" cannot travel as an
+// empty list. That is why the selection carries an explicit `all` flag instead
+// of being inferred from an empty array: `ALL_SELECTED` and `NONE_SELECTED`
+// look alike on the wire and mean opposite things.
 //
-// Because nothing selected already selects the implied set, those chips render
-// checked, and unchecking one materializes the set minus that chip: "every
-// outbound" is something you can trim, not only replace. A trimmed selection
-// that comes to cover the implied set exactly collapses back to the empty
-// form, so it stays dynamic — an outbound added later joins the round.
+// Individual chips render unchecked under the all-chip. They are about to be
+// probed, but the set they belong to is the engine's to enumerate at run time —
+// the built outbounds, which no endpoint reports — so checking them would
+// promise a specific list the round may not match, and unchecking one would
+// have to materialize the rest: a click on a 476-outbound fleet would name 475
+// refs the reader never asked for. Leaving the all-chip to say it, and letting
+// a chip click start an explicit list, keeps both readings honest.
+//
+// A chip can stand for a set of other chips: `groups` names them, so one click
+// covers the bundle. In the probe picker a pool chip selects its member
+// outbounds — probing "pool:x" as a route of its own asks the pool's selector
+// to pick ONE member, so a round through it says almost nothing about the
+// others.
 //
 // A live fleet has hundreds of outbounds, so the individual chips sit in a
 // bounded scroll box with a filter above a threshold: an unbounded grid of 300
@@ -32,55 +36,121 @@ import { matches, SearchInput } from "./SearchInput";
  *  visibleChoices). */
 const FILTER_AT = 12;
 
-/** The choices the all-chip covers: `implied` when the caller narrows it,
- *  every choice otherwise. */
-export function impliedChoices(
-  choices: string[],
-  implied?: string[],
-): string[] {
-  return implied ?? choices;
+/** What the picker holds. `all` on means the engine's own enumeration, and
+ *  `refs` is empty; `all` off means exactly the refs — possibly none, which is
+ *  a state a caller has to handle rather than send. */
+export interface ChipSelection {
+  all: boolean;
+  refs: string[];
 }
 
-/** Whether a chip renders as checked. With nothing selected the implied set
- *  IS what is selected — the empty form means "every implied choice" on the
- *  wire — so those chips read as checked; showing them off would hide what
- *  the round is about to do. */
+/** The all-mode selection: what a form starts at, and what clicking the
+ *  all-chip from an explicit list returns to. On the wire it is an omitted
+ *  list, which stays dynamic — an outbound added later joins the round. */
+export const ALL_SELECTED: ChipSelection = { all: true, refs: [] };
+
+/** Nothing selected: all-mode off and no chip checked. Reachable by
+ *  unchecking the all-chip, and unrunnable — the caller says so, because both
+ *  wire formats read an empty list as "every one of them". */
+export const NONE_SELECTED: ChipSelection = { all: false, refs: [] };
+
+/** True for the state the wire cannot carry: all-mode off and no chip
+ *  checked. Callers gate their run/save button on it rather than sending an
+ *  empty list, which the engine would read as "every one of them". */
+export function isNothingSelected(sel: ChipSelection): boolean {
+  return !sel.all && sel.refs.length === 0;
+}
+
+/** How a selection reads in a card head or a summary: all-mode as the phrase
+ *  the picker uses for it, an explicit list as a count, and the nothing-selected
+ *  state as itself rather than as a count of zero. */
+export function selectionWord(
+  sel: ChipSelection,
+  allLabel: string,
+  noun: string,
+): string {
+  if (sel.all) return allLabel;
+  const n = sel.refs.length;
+  if (n === 0) return `no ${noun}s`;
+  return `${n} ${noun}${n === 1 ? "" : "s"}`;
+}
+
+/** Why nothing is selected, in the words both pickers share. The engine reads
+ *  an empty list as "every one of them", so this state cannot be sent — it is a
+ *  form the reader has to finish, not a round the engine will reject. */
+export function nothingSelectedProblem(
+  what: string,
+  allLabel: string,
+): { blocked: true; message: string } {
+  return {
+    blocked: true,
+    message: `No ${what} selected — pick at least one, or check “${allLabel}”. An empty list would mean every one of them, which is not what unchecking it asks for.`,
+  };
+}
+
+/** A chip that stands for other chips: clicking it checks or unchecks the whole
+ *  set, and it reads as checked only while all of them are. */
+export interface ChipGroup {
+  /** the chip's own label — a pool ref in the probe picker */
+  ref: string;
+  /** the chips one click on it selects */
+  members: string[];
+}
+
+/** The refs one chip covers: its group's members, or just itself. A group with
+ *  no members falls back to its own ref, so an empty pool still selects
+ *  something a round can answer for (the engine reports no usable outbound)
+ *  rather than a click that appears to do nothing. */
+export function covers(groups: ChipGroup[], ref: string): string[] {
+  const members = groups.find((g) => g.ref === ref)?.members;
+  return members === undefined || members.length === 0 ? [ref] : members;
+}
+
+/** Whether a chip renders as checked: only from an explicit selection, and only
+ *  when everything it covers is in it. Under the all-chip nothing reads checked
+ *  — see the header for why the round's own set is not spelled out here. */
 export function chipChecked(
-  selected: string[],
-  implied: string[],
+  sel: ChipSelection,
+  groups: ChipGroup[],
   ref: string,
 ): boolean {
-  return (selected.length === 0 ? implied : selected).includes(ref);
+  if (sel.all) return false;
+  return covers(groups, ref).every((c) => sel.refs.includes(c));
 }
 
-/** The next selection when one chip is toggled. From all-mode the implied set
- *  materializes, minus the chip just unchecked or plus the one just checked;
- *  from an explicit selection it is the plain toggle. Either way, a selection
- *  that comes to mean exactly what the all-chip means collapses back to the
- *  empty form: a materialized copy of "every outbound" would silently miss
- *  outbounds added later, and the engine's own expansion would not. */
-export function toggleChoice(
-  selected: string[],
-  implied: string[],
+/** The next selection when one chip is clicked. The all-chip turns off: a list
+ *  the reader named is what they get, and "every one of them plus this" is not
+ *  a thing either wire format can say. The click is then a plain toggle of the
+ *  refs the chip covers, so unchecking the last chip reaches NONE_SELECTED —
+ *  which the caller refuses to run rather than sending as an empty list. */
+export function toggleChip(
+  sel: ChipSelection,
+  groups: ChipGroup[],
   ref: string,
-): string[] {
-  const base = selected.length === 0 ? implied : selected;
-  const next = base.includes(ref)
-    ? base.filter((r) => r !== ref)
-    : [...base, ref];
-  const coversImplied =
-    implied.length > 0 &&
-    next.length === implied.length &&
-    implied.every((r) => next.includes(r));
-  return coversImplied ? [] : next;
+): ChipSelection {
+  const covered = covers(groups, ref);
+  const base = sel.all ? [] : sel.refs;
+  const on = covered.every((c) => base.includes(c));
+  return {
+    all: false,
+    refs: on
+      ? base.filter((r) => !covered.includes(r))
+      : [...base, ...covered.filter((c) => !base.includes(c))],
+  };
+}
+
+/** The next selection when the all-chip is clicked. Off means nothing is
+ *  selected — not "every one of them", which is what leaving the list empty
+ *  would silently mean on the wire. */
+export function toggleAll(sel: ChipSelection): ChipSelection {
+  return sel.all ? NONE_SELECTED : ALL_SELECTED;
 }
 
 /** The chips the box shows: everything matching the filter, plus whatever is
  *  selected whether it matches or not — a selection the filter pushed out of
  *  sight reads as a selection lost. The pinning stops at a large selection,
- *  though: "every outbound minus one", materialized by unchecking a chip in
- *  all-mode, would force hundreds of checked chips into view and defeat the
- *  filter at exactly the fleet sizes that need it. */
+ *  though: a fleet-wide list would force hundreds of checked chips into view
+ *  and defeat the filter at exactly the sizes that need it. */
 export function visibleChoices(
   choices: string[],
   selected: string[],
@@ -94,30 +164,32 @@ export function ChipPicker({
   id,
   allLabel,
   choices,
-  selected,
+  value,
   onChange,
-  implied,
+  groups = [],
 }: {
   id: string;
+  /** what the all-chip reads, in the caller's terms */
   allLabel: string;
+  /** every chip the box can show, group chips included */
   choices: string[];
-  selected: string[];
-  onChange: (next: string[]) => void;
-  /** The subset of `choices` the all-chip covers; every choice by default. */
-  implied?: string[] | undefined;
+  value: ChipSelection;
+  onChange: (next: ChipSelection) => void;
+  /** chips that select a set of other chips */
+  groups?: ChipGroup[];
 }) {
   const [filter, setFilter] = useState("");
   const filterRef = useRef<HTMLInputElement>(null);
-  const all = impliedChoices(choices, implied);
-  const shown = visibleChoices(choices, selected, filter);
+  const shown = visibleChoices(choices, value.refs, filter);
   const toggle = (ref: string) => {
-    const next = toggleChoice(selected, all, ref);
+    const next = toggleChip(value, groups, ref);
     onChange(next);
     // Unchecking a chip that was on screen only because it was checked drops
     // its checkbox out of the DOM, and the keyboard focus with it; hand the
     // focus to the filter box so the reader keeps their place.
     const stillShown =
-      matches(ref, filter) || (next.length <= FILTER_AT && next.includes(ref));
+      matches(ref, filter) ||
+      (next.refs.length <= FILTER_AT && next.refs.includes(ref));
     if (filter !== "" && !stillShown) {
       filterRef.current?.focus();
     }
@@ -126,11 +198,11 @@ export function ChipPicker({
   return (
     <>
       <div className="chip-grid">
-        <label className={`chip${selected.length === 0 ? " on" : ""}`}>
+        <label className={`chip${value.all ? " on" : ""}`}>
           <input
             type="checkbox"
-            checked={selected.length === 0}
-            onChange={() => onChange([])}
+            checked={value.all}
+            onChange={() => onChange(toggleAll(value))}
           />
           {allLabel}
         </label>
@@ -145,7 +217,11 @@ export function ChipPicker({
       )}
       <div className="chip-grid chip-scroll">
         {shown.map((ref) => {
-          const checked = chipChecked(selected, all, ref);
+          const checked = chipChecked(value, groups, ref);
+          // A group chip says what one click on it selects: without the count,
+          // a pool reads as one route among hundreds.
+          const members = covers(groups, ref);
+          const isGroup = members.length > 1 || members[0] !== ref;
           return (
             <label key={ref} className={`chip${checked ? " on" : ""}`}>
               <input
@@ -154,6 +230,7 @@ export function ChipPicker({
                 onChange={() => toggle(ref)}
               />
               <span className="mono">{ref}</span>
+              {isGroup && <span className="chip-count">{members.length}</span>}
             </label>
           );
         })}
@@ -164,10 +241,7 @@ export function ChipPicker({
           {/* A selection larger than FILTER_AT is not pinned into the filtered
               view — see visibleChoices — so without this the reader is looking
               at a box of unchecked chips while hundreds of them are selected. */}
-          {selected.length > 0
-            ? ` — ${selected.length} selected`
-            : ""}
-          .
+          {value.refs.length > 0 ? ` — ${value.refs.length} selected` : ""}.
         </div>
       )}
     </>

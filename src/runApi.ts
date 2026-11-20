@@ -178,13 +178,19 @@ export interface ProbeRunRequest {
 }
 
 /** `engine.probes.http` (`config.HTTPProbeConfig`) — the scheduled round's
- *  spec, the same shape as a manual run's. */
+ *  spec, the same shape as a manual run's.
+ *
+ *  The Go struct has no `omitempty` on any field, so a stored schedule serves
+ *  every one of them back: the slices and the map as `null` when they were
+ *  never set, the numbers as `0`. Typed as nullable for the same reason — an
+ *  `?: string[]` would let a reader index a `null` the type says cannot
+ *  arrive. */
 export interface HTTPProbeConfig {
-  targets?: string[];
+  targets?: string[] | null;
   method?: string;
-  headers?: Record<string, string>;
+  headers?: Record<string, string> | null;
   body?: string;
-  routes?: string[];
+  routes?: string[] | null;
   timeout_seconds?: number;
   max_body_bytes?: number;
 }
