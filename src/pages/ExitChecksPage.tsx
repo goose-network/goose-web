@@ -25,7 +25,14 @@ import {
   TextField,
 } from "../components/fields";
 import { StringList } from "../components/StringList";
-import { ChipPicker } from "../components/ChipPicker";
+import {
+  ALL_SELECTED,
+  ChipPicker,
+  isNothingSelected,
+  nothingSelectedProblem,
+  selectionWord,
+  type ChipSelection,
+} from "../components/ChipPicker";
 import { formatDuration, formatTime } from "../format";
 import {
   buildExitRunSpec,
@@ -271,7 +278,11 @@ function SingleRunCard({
   const saved = editorSeedSites(engine.data?.exit_checks?.sites);
   const [sites, setSites] = useState<string[]>([]);
   const [touched, setTouched] = useState(false);
-  const [only, setOnly] = useState<string[]>([]);
+  // All-mode is the starting selection: it travels to the engine as an absent
+  // outbound list, which it reads as "every address-bearing outbound". A click
+  // on a chip leaves all-mode for exactly that chip; unchecking the all-chip
+  // leaves nothing selected, which the run button refuses (below).
+  const [only, setOnly] = useState<ChipSelection>(ALL_SELECTED);
   const [timeoutSec, setTimeoutSec] = useState(0);
   const [concurrency, setConcurrency] = useState(0);
   const [results, setResults] = useState<ExitCheck[] | null>(null);
@@ -327,6 +338,10 @@ function SingleRunCard({
     [outbounds.data],
   );
   const badSite = useMemo(() => firstBadSite(sites), [sites]);
+  // Nothing selected is not "every outbound": the wire reads an empty outbound
+  // list as every address-bearing one, so this state is refused rather than
+  // sent as the opposite of what the picker shows.
+  const noOutbounds = isNothingSelected(only);
   // "Save as the defaults" only lights up once the reader has edited *this*
   // list. `saved` moves whenever the Check sites card saves, and comparing
   // against it alone would offer to undo that save with this card's older copy.
@@ -388,7 +403,7 @@ function SingleRunCard({
   };
 
   const run = async () => {
-    if (badSite !== undefined) return;
+    if (badSite !== undefined || noOutbounds) return;
     // Retire any chain still looking for an earlier detached round, or its next
     // tick would read this run's rows as that round's and overwrite the table.
     runSeq.current += 1;
@@ -406,7 +421,17 @@ function SingleRunCard({
     try {
       const res = await runExitChecksNow(
         goose,
-        buildExitRunSpec({ sites, outbounds: only, timeoutSec, concurrency }),
+        // All-mode sends no outbound list, which the engine expands to every
+        // address-bearing built outbound; an explicit selection sends exactly
+        // its ids. Nothing-selected never reaches here (run() and the button
+        // both refuse it), because on the wire it is indistinguishable from
+        // all-mode.
+        buildExitRunSpec({
+          sites,
+          outbounds: only.all ? [] : only.refs,
+          timeoutSec,
+          concurrency,
+        }),
       );
       // The entry hop needs the same fence as the chain: the engine can hold
       // this request for 25s, and the reader may navigate away mid-flight —
@@ -442,19 +467,19 @@ function SingleRunCard({
             : `${sites.length} site${sites.length === 1 ? "" : "s"}`}
         </span>
         <span className="pill">
-          {only.length === 0
-            ? "every outbound"
-            : `${only.length} outbound${only.length === 1 ? "" : "s"}`}
+          {selectionWord(only, "every outbound", "outbound")}
         </span>
         <button
           type="button"
           className="primary"
           onClick={() => void run()}
-          disabled={running || badSite !== undefined}
+          disabled={running || badSite !== undefined || noOutbounds}
           title={
             badSite !== undefined
               ? "Fix the check site first — the engine needs an absolute http(s) URL"
-              : undefined
+              : noOutbounds
+                ? nothingSelectedProblem("outbound", "every outbound").message
+                : undefined
           }
         >
           {running ? "Checking…" : "Check now"}
@@ -523,25 +548,23 @@ function SingleRunCard({
       <FieldGroup
         id="run-outbounds"
         label="Outbounds"
-        hint="Nothing selected checks every outbound that has a server address. Outbounds without one — a tunnel or a “direct” — have no exit IP of their own to report, so the engine skips them here and no chip below reads as checked in that mode."
+        hint="“Every outbound” checks each built outbound that has a server address. Unchecking it selects nothing — click the outbounds this run should use. Outbounds without an address — a tunnel or a “direct” — have no exit IP of their own to report, so the engine skips them here either way."
       >
-        {/* implied={[]}: this list is not what the engine's all-mode stands
-            for. It skips any outbound whose Address() is empty *before* it
-            looks at the selection (internal/exitip/manager.go), so "every
-            outbound" here is the address-bearing subset of the BUILT ones —
-            which /api/outbounds cannot tell this page about, since it serves
-            the configured specs and each plugin reports its address under its
-            own key. Rendering every chip as checked would promise a check for
-            outbounds the round will skip; naming none leaves the hint to
-            describe the rule, and a click still pins one chip exactly. */}
+        {/* No groups here: the engine takes bare outbound ids for this run and
+            has no pool or chain notion in it, so every chip is its own ref. */}
         <ChipPicker
           id="run-outbounds"
           allLabel="every outbound"
           choices={ids}
-          selected={only}
+          value={only}
           onChange={setOnly}
-          implied={[]}
         />
+        {noOutbounds && (
+          // The wire reads an empty outbound list as every address-bearing
+          // outbound, so this state is the one thing the run must not send:
+          // it would check a fleet the reader just unchecked.
+          <Notice>{nothingSelectedProblem("outbound", "every outbound").message}</Notice>
+        )}
         {ids.length === 0 && !outbounds.loading && outbounds.error === null && (
           <div className="field-hint">
             No outbounds are configured yet — add one on the Outbounds page first.

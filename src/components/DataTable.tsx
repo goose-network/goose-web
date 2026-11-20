@@ -4,7 +4,7 @@
 // all render from the same component, so no page can ship a table that
 // forgets one of them.
 
-import type { ReactNode } from "react";
+import { Fragment, type ReactNode } from "react";
 import { Notice } from "./Notice";
 
 export interface Column<T> {
@@ -29,6 +29,17 @@ export interface DataTableProps<T> {
   foot?: ReactNode | undefined;
   /** accessible name for the table */
   caption: string;
+  /** An expanded row: `content` renders in a full-width cell directly under
+   *  the row whose key matches, and that row gets an `editing` class so the
+   *  pair reads as one thing. Nothing is rendered when no row matches — a
+   *  filtered-away row leaves its editor to whoever passed it in. Deliberately
+   *  knows nothing about what goes in the cell; the caller decides. */
+  editor?: EditorRow | null | undefined;
+}
+
+export interface EditorRow {
+  key: string;
+  content: ReactNode;
 }
 
 export function DataTable<T>({
@@ -41,6 +52,7 @@ export function DataTable<T>({
   empty,
   foot,
   caption,
+  editor = null,
 }: DataTableProps<T>) {
   if (error !== null) {
     return (
@@ -86,15 +98,28 @@ export function DataTable<T>({
             </tr>
           </thead>
           <tbody style={loading ? { opacity: 0.55 } : undefined}>
-            {rows.map((r) => (
-              <tr key={rowKey(r)}>
-                {columns.map((c) => (
-                  <td key={c.key} className={c.className}>
-                    {c.render(r)}
-                  </td>
-                ))}
-              </tr>
-            ))}
+            {rows.map((r) => {
+              const key = rowKey(r);
+              // Narrowed once, so the editor row below can read it without a
+              // second check (and without an `editor!`).
+              const open = editor !== null && editor.key === key ? editor : null;
+              return (
+                <Fragment key={key}>
+                  <tr className={open === null ? undefined : "editing"}>
+                    {columns.map((c) => (
+                      <td key={c.key} className={c.className}>
+                        {c.render(r)}
+                      </td>
+                    ))}
+                  </tr>
+                  {open !== null && (
+                    <tr className="editor-row">
+                      <td colSpan={columns.length}>{open.content}</td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })}
           </tbody>
         </table>
       </div>

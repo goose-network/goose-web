@@ -29,7 +29,14 @@ import {
   TextField,
 } from "../components/fields";
 import { StringList } from "../components/StringList";
-import { ChipPicker } from "../components/ChipPicker";
+import {
+  ALL_SELECTED,
+  ChipPicker,
+  isNothingSelected,
+  selectionWord,
+  type ChipGroup,
+  type ChipSelection,
+} from "../components/ChipPicker";
 import { PathStrip } from "../components/PathStrip";
 import { formatDuration, formatTime } from "../format";
 import { cleanList, httpUrl } from "../validate";
@@ -50,8 +57,10 @@ import {
   phaseLeg,
   probeResponse,
   probeRoundProblem,
+  PROBE_CAPS,
   PROBE_TARGET_PRESETS,
   REASON_LABELS,
+  selectionFromStored,
   type ExpectationFields,
   type Expectations,
   type Header,
@@ -86,7 +95,11 @@ const INITIAL_FORM: ProbeForm = {
   method: "GET",
   headers: [],
   body: "",
-  routes: [],
+  // All-mode is the starting selection, not an empty one: it is what the wire
+  // omits, and it is the only selection that stays dynamic as the fleet
+  // changes. Unchecking it leaves nothing selected — a state the run button
+  // refuses, since sending it would mean every outbound again.
+  routes: ALL_SELECTED,
   timeoutSec: 0,
   maxBodyBytes: 0,
   expect: { statuses: "", headers: [], body: [] },
@@ -97,8 +110,10 @@ const INITIAL_FORM: ProbeForm = {
 interface RouteChoices {
   /** every reference the engine can resolve, plus the bare "direct" */
   choices: string[];
-  /** the subset the empty selection expands to: one ref per configured outbound */
+  /** the subset an all-mode round expands to: one ref per configured outbound */
   implied: string[];
+  /** pool chips and the member outbounds one click on them selects */
+  groups: ChipGroup[];
   loading: boolean;
   error: string | null;
 }
@@ -145,6 +160,27 @@ export function ProbesPage() {
       (resources.data?.[0] ?? []).map((o) => o.id),
       "outbound",
     );
+    // A pool chip selects its members rather than "pool:<id>", because probing
+    // through a pool runs that pool's real selector and picks ONE member — a
+    // round that says almost nothing about the other three hundred. Members are
+    // restricted to outbounds the engine actually has configured: a pool can
+    // name an id that was deleted, and a ref to a nonexistent outbound is a
+    // round that fails for a reason the reader did not choose.
+    const configured = new Set(outboundRefs);
+    const groups = (resources.data?.[1] ?? [])
+      .filter((p): p is NonNullable<typeof p> => p.id !== undefined && p.id !== "")
+      .map((p) => ({
+        ref: `pool:${p.id}`,
+        // Deduped, because a pool can name one outbound twice: the pools editor
+        // does not clean the list, and a provider-fed pool gains a repeat when
+        // two providers emit the same id into it. A repeat would inflate the
+        // chip's member count and hand the round the same route twice — the
+        // engine runs it once, since `probeRoutes` drops repeats.
+        members: [...new Set(refs(p.outbound_ids ?? [], "outbound"))].filter((r) =>
+          configured.has(r),
+        ),
+      }))
+      .filter((g) => g.members.length > 0);
     return {
       choices: [
         ...outboundRefs,
@@ -153,6 +189,7 @@ export function ProbesPage() {
         "direct",
       ],
       implied: outboundRefs,
+      groups,
       loading: resources.loading,
       error: resources.error,
     };
@@ -193,10 +230,11 @@ function ProbeRunCard({
   const [running, setRunning] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
 
-  // The engine rejects an over-cap round outright, and trimming a large fleet
-  // is the easiest way to make one: unchecking a single chip names the other
-  // four hundred. Judge the round here, where the fix is one click away,
-  // rather than surfacing a 400 after the reader hit "Probe now".
+  // The engine rejects an over-cap round outright, and one click on a pool chip
+  // is the easiest way to make one: a 600-outbound pool names all 600 routes.
+  // Judge the round here, where the fix is one click away, rather than
+  // surfacing a 400 after the reader hit "Probe now". The same call rejects the
+  // nothing-selected state, which has no wire form at all.
   const roundProblem = probeRoundProblem(
     form.routes,
     cleanList(form.targets).length,
@@ -255,7 +293,7 @@ function ProbeRunCard({
     });
   };
 
-  const routeWord = form.routes.length === 0 ? "every outbound" : `${form.routes.length} route${form.routes.length === 1 ? "" : "s"}`;
+  const routeWord = selectionWord(form.routes, "every outbound", "route");
 
   // A pasted request can carry any method token (“PURGE”), and a select whose
   // value matches no option renders blank — the form would hide the method the
@@ -365,7 +403,7 @@ function ProbeRunCard({
         <RawRequestPatch targets={form.targets} patch={patch} />
         <RoutePicker
           routes={routeChoices}
-          selected={form.routes}
+          value={form.routes}
           onChange={(routes) => patch({ routes })}
           problem={roundProblem}
         />
@@ -418,36 +456,38 @@ function TargetPresets({
   );
 }
 
-/** Route references to probe through. The nothing-selected choice — "every
- *  built outbound" — is the shared picker's own chip, and it covers exactly
- *  `implied`: those chips render checked under it, and unchecking one trims
- *  the round to the rest. Trimming a large fleet is where the engine's own
- *  caps bite, so `problem` is reported here, next to the control that caused
- *  it, rather than only on the button. */
+/** Route references to probe through. The picker's all-chip — "every
+ *  outbound" — is the engine's own enumeration: it stays checked until the
+ *  reader names routes, and unchecking it selects nothing, which the caps
+ *  notice below then reports rather than the engine silently re-reading an
+ *  empty list as "every outbound". A pool chip selects its member outbounds,
+ *  so one click probes the whole pool instead of whichever member its selector
+ *  happens to pick. `problem` is reported here, next to the control that
+ *  caused it, rather than only on the button. */
 function RoutePicker({
   routes,
-  selected,
+  value,
   onChange,
   problem,
 }: {
   routes: RouteChoices;
-  selected: string[];
-  onChange: (routes: string[]) => void;
+  value: ChipSelection;
+  onChange: (routes: ChipSelection) => void;
   problem: ProbeCapProblem | null;
 }) {
   return (
     <FieldGroup
       id="probe-routes"
       label="Routes"
-      hint="“Every outbound” probes each built outbound — uncheck the ones this round should skip. A pool or chain is probed through its own selection path — the same one dispatch uses. The engine caps a round at 128 routes and 512 requests, so trimming a fleet larger than that names too many to run."
+      hint={`“Every outbound” probes each built outbound, and stays live as the fleet changes. Unchecking it selects nothing — click the routes this round should use. A pool chip selects all of that pool's outbounds, because a round through “pool:…” itself probes only the one member its selector picks. A chain is probed through its own selection path — the same one dispatch uses. The engine caps a round at ${PROBE_CAPS.maxFanout} requests (targets × routes) and ${PROBE_CAPS.maxRoutes} routes, so a fleet-wide selection needs a single target.`}
     >
       <ChipPicker
         id="probe-routes"
         allLabel="every outbound"
         choices={routes.choices}
-        selected={selected}
+        value={value}
         onChange={onChange}
-        implied={routes.implied}
+        groups={routes.groups}
       />
       {problem !== null && <Notice>{problem.message}</Notice>}
       {routes.error !== null ? (
@@ -870,6 +910,10 @@ function ScheduledProbeCard({
   const set = (p: Partial<ProbeEngineProbes>) => setDraft({ ...draft, ...p });
   const http = draft.http;
   const targets = http?.targets ?? [];
+  // A stored spec spells all-mode as an absent (or empty) route list — the
+  // engine has no "nothing selected", so reading it back can only be one of the
+  // two wire states.
+  const storedRoutes = selectionFromStored(http?.routes);
   // The engine rejects a scheduled probe whose targets are not absolute URLs,
   // and it does so for the whole config — so check before the round trip.
   const badTarget = targets.find((t) => httpUrl(t, "bad") !== null);
@@ -882,12 +926,17 @@ function ScheduledProbeCard({
   // copying an empty form would quietly stop a schedule that works — which is
   // what "Clear the HTTP probe" exists to do deliberately.
   const formHasTargets = form.targets.some((t) => t.trim() !== "");
+  // A form with nothing selected has no wire form either: storing it would drop
+  // the route list, and the engine reads an absent list as "every built
+  // outbound" — the opposite of what the picker shows. So the copy is refused
+  // until the reader names routes or turns all-mode back on.
+  const formRoutesBlocked = isNothingSelected(form.routes);
   // The same caps the run form judges, applied to what is about to be stored.
-  // Without this a spec trimmed from a large fleet can be saved with a
-  // "Probe schedule saved" toast and then fail every interval: the engine
-  // rejects the whole round, so nothing it was meant to measure happens.
+  // Without this a spec naming a whole pool can be saved with a "Probe schedule
+  // saved" toast and then fail every interval: the engine rejects the whole
+  // round, so nothing it was meant to measure happens.
   const scheduleProblem = probeRoundProblem(
-    http?.routes ?? [],
+    storedRoutes,
     targets.length,
     estimatedRoutes,
   );
@@ -965,9 +1014,7 @@ function ScheduledProbeCard({
           <div>
             <dt>Routes</dt>
             <dd className="mono">
-              {(http?.routes ?? []).length === 0
-                ? "every outbound"
-                : (http?.routes ?? []).join(", ")}
+              {storedRoutes.all ? "every outbound" : storedRoutes.refs.join(", ")}
             </dd>
           </div>
           <div>
@@ -1025,11 +1072,13 @@ function ScheduledProbeCard({
         <button
           type="button"
           onClick={() => set({ http: buildProbeSpec(form) })}
-          disabled={!formHasTargets}
+          disabled={!formHasTargets || formRoutesBlocked}
           title={
-            formHasTargets
-              ? "Store the spec from the run form above as the scheduled probe"
-              : "The run form has no target, and the engine skips an HTTP probe with none — copying it would quietly stop a schedule that works. Use “Clear the HTTP probe” to do that on purpose."
+            !formHasTargets
+              ? "The run form has no target, and the engine skips an HTTP probe with none — copying it would quietly stop a schedule that works. Use “Clear the HTTP probe” to do that on purpose."
+              : formRoutesBlocked
+                ? "The run form has no route selected. A stored spec cannot say “nothing”: an absent route list means every built outbound, so name the routes (or check “every outbound”) before copying."
+                : "Store the spec from the run form above as the scheduled probe"
           }
         >
           Use the probe form's settings

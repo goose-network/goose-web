@@ -402,6 +402,31 @@ table.data tbody tr:hover td {
   background: var(--surface-2);
 }
 
+/* An inline editor belongs to the row it edits: the row is tinted and its
+   bottom border dropped, so the form under it reads as that row opened up
+   rather than as a card that appeared somewhere in the table. Both rules sit
+   after the hover rule at the same specificity, so the tint wins on hover —
+   a row whose editor you are looking at should not change colour under the
+   pointer. */
+table.data tbody tr.editing td {
+  background: var(--accent-soft);
+  border-bottom-color: transparent;
+}
+
+/* The editor's own row: it holds a FormCard in its inline variant, which
+   deliberately brings no chrome of its own — the table sits inside the page's
+   `.card`, so that is the surface the form renders on. The cell gives it room
+   below and none at the sides: `table.data td` has no left padding and the
+   last column none on the right, so the editor lines up pixel-exactly with
+   the cells of the row it hangs under instead of floating in a gutter. */
+table.data tbody tr.editor-row td {
+  padding: 12px 0 16px;
+}
+
+table.data tbody tr.editor-row:hover td {
+  background: transparent;
+}
+
 table.data td.actions {
   white-space: nowrap;
   text-align: right;
@@ -883,6 +908,15 @@ button:disabled {
   min-width: 0;
 }
 
+/* A StringList over grouped choices renders a <select> in the input's place
+   (chain layers), and it is not an `input`, so it needs the same width rule:
+   without `min-width: 0` a long option ("outbound:psiphon-1.2.3.4") sets the
+   select's minimum and pushes the row's move/remove buttons out of the card. */
+.arr-editor .item-row select {
+  flex: 1;
+  min-width: 0;
+}
+
 /* editors nest fields; the outer editor owns the vertical rhythm */
 .arr-editor .field,
 .arr-editor .item-row .field {
@@ -1084,6 +1118,24 @@ button.chip {
 
 .chip input {
   margin: 0;
+}
+
+/* A group chip (a pool, in the probe route picker) says how many chips one
+   click on it selects: without the count it reads as one route among
+   hundreds, and the reader cannot tell that picking it commits to 40. */
+.chip-count {
+  padding: 0 5px;
+  border-radius: 99px;
+  background: var(--surface-sunken);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+}
+
+.chip.on .chip-count {
+  background: var(--surface-2);
+  color: var(--text-secondary);
 }
 
 /* Assertion verdicts: a pass/fail count, then one pill per assertion whose

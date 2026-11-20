@@ -9,6 +9,8 @@
 // and a spec built from a half-filled form has to reach the engine with its
 // defaults intact rather than zeros.
 
+import type { ChipSelection } from "../components/ChipPicker";
+import { ALL_SELECTED, nothingSelectedProblem } from "../components/ChipPicker";
 import type { ProbeRunRequest } from "../runApi";
 import { cleanList } from "../validate";
 
@@ -226,10 +228,29 @@ export interface ProbeSpecFields {
   method: string;
   headers: Header[];
   body: string;
-  /** route references; empty means every built outbound */
-  routes: string[];
+  /** The routes to probe, as the picker holds them: all-mode (the engine
+   *  enumerates the built outbounds at run time) or an explicit list of
+   *  references. The distinction is the picker's, not the wire's — an empty
+   *  `routes` array means all-mode to the engine, so "no routes selected" has
+   *  no wire form at all and must never reach `buildProbeSpec` unchecked. */
+  routes: ChipSelection;
   timeoutSec: number;
   maxBodyBytes: number;
+}
+
+/** All-mode as the wire spells it, for a spec read back out of the engine: a
+ *  stored route list is absent, `null`, or empty (every built outbound), or
+ *  exactly the references. `null` is the one worth spelling out — the engine
+ *  stores every field of `config.HTTPProbeConfig` (no `omitempty`), so a
+ *  schedule saved in all-mode, which omits the list, comes back as
+ *  `"routes": null`. Nothing-selected cannot be stored, so it cannot come
+ *  back. */
+export function selectionFromStored(
+  routes: string[] | null | undefined,
+): ChipSelection {
+  return routes === null || routes === undefined || routes.length === 0
+    ? ALL_SELECTED
+    : { all: false, refs: [...routes] };
 }
 
 /**
@@ -249,7 +270,16 @@ export function buildProbeSpec(f: ProbeSpecFields): ProbeRunRequest {
   const headers = headerMap(f.headers);
   if (Object.keys(headers).length > 0) spec.headers = headers;
   if (f.body !== "" && carriesBody(method)) spec.body = f.body;
-  if (f.routes.length > 0) spec.routes = [...f.routes];
+  // All-mode travels as an omitted list, which is how the engine spells "one
+  // route per built outbound". An explicit selection travels as itself, cleaned
+  // the way the targets are — `probeRoutes` trims and drops repeats on the far
+  // side, so a repeat sent here is a route the engine does not run. The third
+  // state — nothing selected — has no wire form, so callers gate on
+  // probeRoundProblem before building; reaching it here would silently send
+  // all-mode instead of the empty round the reader asked for.
+  if (!f.routes.all && f.routes.refs.length > 0) {
+    spec.routes = cleanList(f.routes.refs);
+  }
   if (f.timeoutSec > 0) spec.timeout_seconds = f.timeoutSec;
   if (f.maxBodyBytes > 0) spec.max_body_bytes = f.maxBodyBytes;
   return spec;
@@ -299,14 +329,21 @@ export function orDefault(
 
 /** The engine's hard limits on one probe round (internal/router/httpprobe.go:
  *  `maxProbeRoutes`, `maxProbeFanout`). Either one rejects the *whole* round
- *  before a single request goes out — there is no partial run to look at. */
-export const PROBE_CAPS = { maxRoutes: 128, maxFanout: 512 } as const;
+ *  before a single request goes out — there is no partial run to look at.
+ *
+ *  The route limit is deliberately far above the fan-out one: naming a whole
+ *  fleet is a legitimate thing to write down, and it is requests — routes ×
+ *  targets — that decide whether a round can run. So the fan-out is the cap
+ *  that bites in practice, and `maxRoutes` is what keeps a single absurd list
+ *  (65536 refs) from being accepted at all. */
+export const PROBE_CAPS = { maxRoutes: 65535, maxFanout: 512 } as const;
 
 /** One round the caps will not allow, in the engine's own terms. */
 export interface ProbeCapProblem {
-  /** True when the breach is arithmetic the engine will repeat exactly, so
-   *  the round must not be offered at all. False when it rests on an estimate
-   *  the engine may not share — then say so and let the reader try. */
+  /** True when the breach is arithmetic the engine will repeat exactly — or a
+   *  state with no wire form at all — so the round must not be offered. False
+   *  when it rests on an estimate the engine may not share: then say so and
+   *  let the reader try. */
   blocked: boolean;
   message: string;
 }
@@ -317,22 +354,32 @@ export interface ProbeCapProblem {
  * An explicit route list is exact: `probeRoutes` only trims and dedupes a
  * non-empty list, so the engine runs precisely those references and both caps
  * are plain arithmetic — `blocked` is true and the reader should not be sent
- * off to collect a 400. That is what makes trimming a large fleet dangerous:
- * unchecking one chip out of 476 names the other 475.
+ * off to collect a 400. Counting the list after dropping repeats is part of
+ * being exact: a stored spec, or one built from a pool that names an outbound
+ * twice, is a list the engine shortens, and counting it verbatim would refuse
+ * a round the engine would happily run. A pool chip makes the cap easy to
+ * reach: one click on a 600-outbound pool names all 600.
  *
- * An empty list is not: the engine expands it to one "outbound:<id>" per
+ * An empty explicit list is the state with no wire form — see
+ * nothingSelectedProblem. It is blocked too, because sending it would run a
+ * round the reader did not ask for.
+ *
+ * All-mode is not exact: the engine expands it to one "outbound:<id>" per
  * *built* outbound, and `/api/outbounds` serves the *configured* specs — there
- * is no built-state endpoint. So `estimatedRoutes` is the configured count,
- * which is an upper bound (an outbound that fails to build drops out). A
- * breach there is a warning, not a block.
+ * is no built-state endpoint. So `estimatedRoutes` is the configured count, an
+ * upper bound (an outbound that fails to build drops out). A breach there is a
+ * warning, not a block.
  */
 export function probeRoundProblem(
-  routes: string[],
+  selection: ChipSelection,
   targetCount: number,
   estimatedRoutes: number,
 ): ProbeCapProblem | null {
-  const exact = routes.length > 0;
-  const count = exact ? routes.length : estimatedRoutes;
+  const exact = !selection.all;
+  const count = exact ? new Set(selection.refs).size : estimatedRoutes;
+  if (exact && count === 0) {
+    return nothingSelectedProblem("route", "every outbound");
+  }
   // The estimate is what it is: a ceiling the engine may come in under.
   const caveat = exact
     ? ""
