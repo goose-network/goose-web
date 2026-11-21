@@ -79,6 +79,37 @@ export function layerOptions(
   ];
 }
 
+/** Why a chain's layers block a save, as a token rather than prose: whatever
+ *  `validate` returns lands in fieldErrors verbatim, and the form compares the
+ *  stored value to choose its message — "layers" shows the "Add at least one
+ *  layer…" Notice, "blank-layer" the "A layer was left unchosen…" one. */
+export type ChainLayerProblem = "layers" | "blank-layer";
+
+/**
+ * chainLayerProblem checks a draft's layers and returns the token that blocks
+ * the save, or null when the save may go through.
+ *
+ * An empty list routes nothing. A row left unchosen (the picker's "Add layer"
+ * starts blank) would store an id the engine resolves to nothing — unknown
+ * refs are silently skipped (internal/router/router.go: "unknown references
+ * are skipped; the chain keeps its order") — so both block the save here
+ * instead of turning into a shorter chain on the server. Empty is answered
+ * first: [] reports "layers", so the reader who removed every row gets the
+ * Notice that tells them to add one, not the unchosen-row one.
+ *
+ * Whether a chosen id still resolves is deliberately not asked here: that is
+ * layerOptions' job, which gives any id the engine no longer knows a
+ * "(not configured)" option so the select does not render blank. Rejecting
+ * such an id in the guard would block saves the engine may still route fine —
+ * the catalog this page saw can be stale, or a list it could not fetch.
+ */
+export function chainLayerProblem(
+  layers: ReadonlyArray<string> | undefined,
+): ChainLayerProblem | null {
+  if (layers === undefined || layers.length === 0) return "layers";
+  return layers.some((l) => l.trim() === "") ? "blank-layer" : null;
+}
+
 export function ChainsPage() {
   const { goose } = useSdk();
   const [filter, setFilter] = useState("");
@@ -136,22 +167,13 @@ export function ChainsPage() {
     blank: () => ({ id: "", layers: [] }),
     normalize: (c) => ({ ...c, layers: c.layers ?? [] }),
     noun: "chain",
-    validate: (d) => {
-      const layers = d.layers ?? [];
-      return collect({
+    validate: (d) =>
+      collect({
         id: required(d.id, "An ID is required"),
-        // An empty list routes nothing. A row left unchosen (the picker's
-        // "Add layer" starts blank) would store an id the engine resolves to
-        // nothing — unknown refs are silently skipped — so both block the save
-        // here instead of turning into a shorter chain on the server.
-        layers:
-          layers.length === 0
-            ? "layers"
-            : layers.some((l) => l.trim() === "")
-              ? "blank-layer"
-              : null,
-      });
-    },
+        // A token, not prose: the form switches on it to choose between the
+        // two layer Notices below. See chainLayerProblem.
+        layers: chainLayerProblem(d.layers),
+      }),
   });
 
   const items = useMemo(

@@ -577,6 +577,80 @@ await test("chain layers are picked from the engine's pools and outbounds", asyn
     "no Outbounds group",
   );
 
+  // The negative path, taken while the row "Add layer" just pushed is still
+  // unchosen (its value is ""): the save has to be blocked HERE, not accepted
+  // and shortened. Nothing downstream would catch it. The engine stores the
+  // layer list verbatim — SetChain cleans nothing, and POST /api/chains echoes
+  // the "" straight back at 201 (internal/config/store.go) — and only skips the
+  // ref it cannot resolve later, when it BUILDS the chain ("unknown references
+  // are skipped; the chain keeps its order", internal/router/router.go). So the
+  // stored chain keeps the hop the reader left blank while the chain traffic
+  // rides does not, and no error anywhere says so.
+  // ChainsPage.chainLayerProblem returns the token that refuses it, and
+  // useResource.save returns before it ever calls the API.
+  assert.equal(
+    await layer.inputValue(),
+    "",
+    "premise: the row 'Add layer' pushed should still be unchosen",
+  );
+  // Scoped by the ID field, not the layers editor: the editor's only row (and
+  // with it #chain-layers) is what the empty-list branch below removes, while
+  // #chain-id lives as long as the draft does.
+  const form = "form:has(#chain-id)";
+  const blankNotice = `${form} .notice[role="alert"]:has-text("left unchosen")`;
+  const emptyNotice = `${form} .notice[role="alert"]:has-text("Add at least one layer")`;
+  await page.click("form button:has-text('Save')");
+  await page.waitForSelector(blankNotice, { timeout: 5_000 });
+  assert.match(
+    await page.locator(blankNotice).innerText(),
+    /remove the row/,
+    "the blocked save did not say what to do about the unchosen row",
+  );
+  // Still open: a blocked save leaves the draft where the reader put it, so the
+  // Notice can be acted on instead of having to start over.
+  assert.ok(
+    (await page.locator("#chain-layers").count()) > 0,
+    "the blocked save closed the form",
+  );
+  // The load-bearing half: nothing reached the engine. A Notice alone would
+  // also be consistent with a POST the server rejected, and this is the case
+  // where the server would NOT have rejected it.
+  assert.ok(
+    !(await api("chains")).some((c) => c.id === id),
+    `the blocked save created ${id} on the engine anyway`,
+  );
+  // … and nothing claimed success. Scoped to this id, so a toast still fading
+  // from an earlier test cannot trip it.
+  assert.equal(
+    await page.locator(`.toast-stack .toast:has-text("${id}")`).count(),
+    0,
+    "the blocked save reported itself as saved",
+  );
+
+  // The same guard's other arm. chainLayerProblem answers "layers" for an empty
+  // list BEFORE it looks for a blank one, because a reader who removed every
+  // row has to be told to add one — the unchosen-row Notice would explain a row
+  // they can no longer see. Exactly one of the two may show.
+  await page
+    .locator(`${form} button[aria-label="Remove Layers (in order) entry 1"]`)
+    .click();
+  await page.waitForSelector("#chain-layers", { state: "detached", timeout: 5_000 });
+  await page.click("form button:has-text('Save')");
+  await page.waitForSelector(emptyNotice, { timeout: 5_000 });
+  await page.waitForSelector(blankNotice, { state: "detached", timeout: 5_000 });
+  assert.ok(
+    (await page.locator("#chain-id").count()) > 0,
+    "the blocked empty-chain save closed the form",
+  );
+  assert.ok(
+    !(await api("chains")).some((c) => c.id === id),
+    `the blocked empty-chain save created ${id} on the engine anyway`,
+  );
+
+  // Put the row back, so the happy path below still has one to pick into.
+  await page.click("button:has-text('Add layer')");
+  await page.waitForSelector("#chain-layers", { timeout: 5_000 });
+
   // Pick the pool when there is one, else the first outbound, and save it.
   const picked = poolIds[0] ?? outboundIds[0];
   await layer.selectOption(picked);
