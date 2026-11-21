@@ -11,7 +11,21 @@
 // engine's built-in defaults" while an explicit `[]` means every site was
 // deleted — the page seeds the defaults into the editor so they can be, and
 // saving the emptied list switches the checks off.
+//
+// The outbound list has the same trap with a sharper edge, because there an
+// empty list does not mean "nothing": `internal/exitip.RunSpec.Outbounds` is
+// omitempty and the engine reads it absent as "check every address-bearing
+// outbound". That is exactly what the picker's all-chip asks for, and exactly
+// the opposite of what unchecking it asks for — so the nothing-selected state
+// has no wire form at all, and the run has to be refused instead of sent.
+// exitRunOutbounds and exitRunProblem are where that refusal is decided; see
+// them below.
 
+import {
+  isNothingSelected,
+  nothingSelectedProblem,
+  type ChipSelection,
+} from "../components/ChipPicker";
 import type { ExitRunSpec } from "../runApi";
 import { cleanList, httpUrl } from "../validate";
 
@@ -79,6 +93,15 @@ export function firstBadSite(sites: string[]): string | undefined {
   return cleanList(sites).find((s) => httpUrl(s, "bad") !== null);
 }
 
+/** The words every bad-site refusal on this page uses, kept here because two
+ *  buttons refuse for the same reason and neither may drift from the other:
+ *  "Check now" (via exitRunProblem) and "Save these sites as the defaults",
+ *  which would otherwise persist the unparseable site into every later round.
+ *  Both also *disable* on the same `firstBadSite` test, so a reader who reads
+ *  one explanation has already been given the other one's. */
+export const BAD_SITE_MESSAGE =
+  "Fix the check site first — the engine needs an absolute http(s) URL";
+
 export interface SitePreset {
   url: string;
   /** why a reader would pick this one */
@@ -129,4 +152,45 @@ export function buildExitRunSpec(f: SingleRunFields): ExitRunSpec {
   if (f.timeoutSec > 0) spec.timeout_seconds = f.timeoutSec;
   if (f.concurrency > 0) spec.concurrency = f.concurrency;
   return spec;
+}
+
+/** The outbound list one run should send, or null for the state that has no
+ *  wire form at all.
+ *
+ *  All-mode is `[]`, and buildExitRunSpec then omits the field — which is the
+ *  engine's own reading of the all-chip: `RunSpec.Outbounds` is omitempty, and
+ *  CheckNow expands an absent list to every address-bearing built outbound.
+ *  An explicit selection sends exactly its refs, copied so the caller cannot
+ *  hand the picker's state to something that mutates it.
+ *
+ *  Nothing selected returns null, not `[]`. `[]` here is indistinguishable from
+ *  all-mode on the wire, so it would check the whole fleet the reader just
+ *  unchecked — the inversion exitRunProblem exists to refuse. The null is what
+ *  makes that refusal compile: run() has to prove the list is non-null before
+ *  it can reach buildExitRunSpec. */
+export function exitRunOutbounds(sel: ChipSelection): string[] | null {
+  if (sel.all) return [];
+  if (isNothingSelected(sel)) return null;
+  return [...sel.refs];
+}
+
+/** Why "Check now" is off, or null when the run may go. Neither branch writes
+ *  its own words: a bad site outranks a missing selection because that is the
+ *  precedence the button's title has always had — an unparseable URL fails
+ *  *every* check against it, whichever outbounds run, so it is the one to fix
+ *  first — and BAD_SITE_MESSAGE is the same sentence the sites-save button's
+ *  title carries, because that button is off for the same reason. A missing
+ *  selection then reuses the pickers' shared message: the engine reads an empty
+ *  list as "every one of them", which is the sentence both pickers need. */
+export function exitRunProblem(
+  sel: ChipSelection,
+  badSite: string | undefined,
+): { blocked: true; message: string } | null {
+  if (badSite !== undefined) {
+    return { blocked: true, message: BAD_SITE_MESSAGE };
+  }
+  if (isNothingSelected(sel)) {
+    return nothingSelectedProblem("outbound", "every outbound");
+  }
+  return null;
 }

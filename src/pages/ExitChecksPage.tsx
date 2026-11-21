@@ -35,6 +35,7 @@ import {
 } from "../components/ChipPicker";
 import { formatDuration, formatTime } from "../format";
 import {
+  BAD_SITE_MESSAGE,
   buildExitRunSpec,
   CHECK_SITE_PRESETS,
   effectiveNumber,
@@ -42,6 +43,8 @@ import {
   ENGINE_DEFAULT_CONCURRENCY,
   ENGINE_DEFAULT_SITES,
   ENGINE_DEFAULT_TIMEOUT_SEC,
+  exitRunOutbounds,
+  exitRunProblem,
   firstBadSite,
   savedSiteList,
 } from "./checkSites";
@@ -281,7 +284,7 @@ function SingleRunCard({
   // All-mode is the starting selection: it travels to the engine as an absent
   // outbound list, which it reads as "every address-bearing outbound". A click
   // on a chip leaves all-mode for exactly that chip; unchecking the all-chip
-  // leaves nothing selected, which the run button refuses (below).
+  // leaves nothing selected, which checkSites.exitRunProblem refuses.
   const [only, setOnly] = useState<ChipSelection>(ALL_SELECTED);
   const [timeoutSec, setTimeoutSec] = useState(0);
   const [concurrency, setConcurrency] = useState(0);
@@ -338,9 +341,15 @@ function SingleRunCard({
     [outbounds.data],
   );
   const badSite = useMemo(() => firstBadSite(sites), [sites]);
-  // Nothing selected is not "every outbound": the wire reads an empty outbound
-  // list as every address-bearing one, so this state is refused rather than
-  // sent as the opposite of what the picker shows.
+  // The run gate, both halves of it in checkSites so the button, the click
+  // handler and the request body cannot drift apart. `runOutbounds` is the list
+  // the engine would get, and null exactly in the state the wire has no form
+  // for — all-mode off and no chip checked — because there an empty list reads
+  // as every address-bearing outbound, the opposite of what the picker shows.
+  const runOutbounds = useMemo(() => exitRunOutbounds(only), [only]);
+  const runProblem = useMemo(() => exitRunProblem(only, badSite), [only, badSite]);
+  // The picker's own explanation, a different concern from the button gate:
+  // this one tells the reader what to do about the box in front of them.
   const noOutbounds = isNothingSelected(only);
   // "Save as the defaults" only lights up once the reader has edited *this*
   // list. `saved` moves whenever the Check sites card saves, and comparing
@@ -403,7 +412,10 @@ function SingleRunCard({
   };
 
   const run = async () => {
-    if (badSite !== undefined || noOutbounds) return;
+    // The null check is the load-bearing half: whatever the button's own state
+    // has drifted to, buildExitRunSpec cannot be handed the list that would
+    // invert the run.
+    if (runProblem !== null || runOutbounds === null) return;
     // Retire any chain still looking for an earlier detached round, or its next
     // tick would read this run's rows as that round's and overwrite the table.
     runSeq.current += 1;
@@ -423,12 +435,12 @@ function SingleRunCard({
         goose,
         // All-mode sends no outbound list, which the engine expands to every
         // address-bearing built outbound; an explicit selection sends exactly
-        // its ids. Nothing-selected never reaches here (run() and the button
-        // both refuse it), because on the wire it is indistinguishable from
-        // all-mode.
+        // its ids. Nothing-selected never reaches here — exitRunOutbounds
+        // returns null for it and run() refuses that, the button refusing too —
+        // because on the wire it is indistinguishable from all-mode.
         buildExitRunSpec({
           sites,
-          outbounds: only.all ? [] : only.refs,
+          outbounds: runOutbounds,
           timeoutSec,
           concurrency,
         }),
@@ -473,14 +485,8 @@ function SingleRunCard({
           type="button"
           className="primary"
           onClick={() => void run()}
-          disabled={running || badSite !== undefined || noOutbounds}
-          title={
-            badSite !== undefined
-              ? "Fix the check site first — the engine needs an absolute http(s) URL"
-              : noOutbounds
-                ? nothingSelectedProblem("outbound", "every outbound").message
-                : undefined
-          }
+          disabled={running || runProblem !== null}
+          title={runProblem?.message}
         >
           {running ? "Checking…" : "Check now"}
         </button>
@@ -560,9 +566,9 @@ function SingleRunCard({
           onChange={setOnly}
         />
         {noOutbounds && (
-          // The wire reads an empty outbound list as every address-bearing
-          // outbound, so this state is the one thing the run must not send:
-          // it would check a fleet the reader just unchecked.
+          // The same refusal the button carries, said where the reader is
+          // looking: an empty outbound list would check a fleet they just
+          // unchecked, so exitRunOutbounds has no list for this state.
           <Notice>{nothingSelectedProblem("outbound", "every outbound").message}</Notice>
         )}
         {ids.length === 0 && !outbounds.loading && outbounds.error === null && (
@@ -604,7 +610,7 @@ function SingleRunCard({
           disabled={cfg.saving || !dirty || badSite !== undefined}
           title={
             badSite !== undefined
-              ? "Fix the check site first — the engine needs an absolute http(s) URL"
+              ? BAD_SITE_MESSAGE
               : dirty
                 ? cleanList(sites).length === 0
                   ? "Save an empty list — this switches exit-IP checks off"

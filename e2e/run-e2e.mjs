@@ -863,6 +863,216 @@ await test("a single exit-IP run works with the schedule untouched", async () =>
   );
 });
 
+await test("an exit-IP run with nothing selected is refused, not sent as every outbound", async () => {
+  await page.goto(`${BASE}/exit-checks`, { waitUntil: "networkidle" });
+  const runCard = page.locator("main .card").first();
+  const group = '[aria-labelledby="run-outbounds-label"]';
+  const chipSel = (ref) => `${group} label.chip:has(span:text-is("${ref}"))`;
+  const allSel = `${group} label.chip:has-text("every outbound")`;
+  // This card-head carries two pills — the site count, then the selection word
+  // (ExitChecksPage.tsx:474-483) — so the one under test is the second.
+  const pill = runCard.locator(".card-head .pill").nth(1);
+  // The refusal renders INSIDE the field: FieldGroup puts its children in the
+  // role=group box and the page renders this Notice as one of them, so it is
+  // scoped by the group rather than hunted for in the card.
+  const notice = runCard.locator(`${group} .notice[role="alert"]`);
+  const checkNow = runCard.locator("button.primary:has-text('Check now')");
+  await checkNow.waitFor({ timeout: 5_000 });
+
+  // The ids exactly as the picker builds them (ExitChecksPage.tsx:335-342):
+  // blank and absent ids dropped, then sorted, so "the first chip" is a
+  // deterministic one on any engine.
+  const ids = (await api("outbounds"))
+    .map((o) => o.id)
+    .filter((id) => typeof id === "string" && id !== "")
+    .sort();
+  assert.ok(ids.length > 0, "engine reports no outbound for the run card to offer");
+  const first = ids[0];
+  // Wait for the picker's own chips instead of trusting an empty box: while the
+  // outbound list is in flight "no chip is checked" passes for the wrong reason
+  // and the recovery click at the end has nothing to click.
+  await page.waitForSelector(chipSel(first), { timeout: 10_000 });
+
+  // Past FILTER_AT the picker hides unmatched chips behind its filter box, so a
+  // chip is only clickable once it is on screen (ChipPicker.tsx:210). CI has one
+  // outbound and therefore no box; this keeps the click honest on a fleet.
+  const filterBox = runCard.locator("#run-outbounds-filter");
+  const pick = async (ref) => {
+    if ((await filterBox.count()) > 0) await filterBox.fill(ref);
+    await runCard.locator(chipSel(ref)).click();
+  };
+  const checked = async (sel) =>
+    (await runCard.locator(sel).count()) > 0 &&
+    (await runCard.locator(`${sel} input`).first().isChecked());
+  // The engine's own answer, read the way the page reads it
+  // (goose.listExitChecks({ n }) → GET /api/exit-checks?n=…). "Nothing was
+  // recorded" has to come from the engine, not from a history table that simply
+  // has not refreshed yet — and the shape is checked, because `undefined ===
+  // undefined` would pass a comparison of two answers that were not lists.
+  const history = async () => {
+    const rows = await api("exit-checks?n=1000");
+    assert.ok(
+      Array.isArray(rows) || rows === null,
+      `GET /api/exit-checks answered neither a list nor null: ${JSON.stringify(rows).slice(0, 120)}`,
+    );
+    // The window AND its newest row, because a count alone goes blind once the
+    // history is deeper than n=1000: a row written then pushes one off the end
+    // and the count never moves. Rows come back newest first — that is why the
+    // page can pass items[0]?.id as its own baseline — so an id that moved is a
+    // round that recorded.
+    return [rows?.length ?? 0, rows?.[0]?.id ?? null];
+  };
+  // Read until the history stops moving, one second apart. The test
+  // above ends with a round that may still be running — the engine hands a slow
+  // one back at 202 and its rows land on the engine's schedule, not this test's
+  // (ExitChecksPage.rowsSince exists because of exactly that). A baseline taken
+  // mid-write moves by itself, and would blame this test's click for somebody
+  // else's round; a fixed sleep instead would have to guess how slow "slow" is.
+  // Whether it settled is RETURNED rather than assumed, for the same reason: a
+  // reading that never stopped moving cannot support "nothing was recorded",
+  // and saying so beats pointing the failure at the click below. The cap is
+  // generous because a settled history returns on the first poll — only one
+  // still writing spends the time, and that is the case where waiting is the
+  // point. Returns [rows, newestId, settled].
+  const settledHistory = async () => {
+    let n = await history();
+    for (let i = 0; i < 15; i++) {
+      await page.waitForTimeout(1_000);
+      const again = await history();
+      if (JSON.stringify(again) === JSON.stringify(n)) return [...n, true];
+      n = again;
+    }
+    return [...n, false];
+  };
+  // Counted in the box, not read off the pill: the all-chip renders in its own
+  // grid, so this selector sees individual chips only.
+  const checkedCount = async () =>
+    await runCard.locator(`${group} .chip-scroll label.chip.on`).count();
+
+  // A fresh form is in all-mode, which is the state that CAN go on the wire:
+  // `exitip.RunSpec.Outbounds` is omitempty, so an absent list is what the engine
+  // reads as "every address-bearing built outbound".
+  assert.ok(await checked(allSel), "all-chip not checked on a fresh form");
+  assert.match(await pill.innerText(), /every outbound/, "pill does not say every outbound");
+  assert.equal(await checkedCount(), 0, "a fresh all-mode form had an outbound chip checked");
+  assert.ok(await checkNow.isEnabled(), "'Check now' disabled on a fresh form");
+
+  // Unchecking "every outbound" leaves nothing selected — the one state the wire
+  // has no form for, because an empty list reads as all-mode at the other end
+  // (checkSites.exitRunOutbounds returns null rather than []).
+  await runCard.locator(`${allSel} input`).click();
+  await page.waitForSelector(`${allSel}.on`, { state: "detached", timeout: 5_000 });
+  assert.match(await pill.innerText(), /no outbounds/, "pill does not say no outbounds");
+  assert.equal(await checkedCount(), 0, "unchecking all-mode left an outbound chip checked");
+  await page.waitForSelector(`${group} .notice[role="alert"]`, { timeout: 5_000 });
+  // Whitespace-blind on both sides: innerText reports the RENDERED text, so it
+  // carries a break wherever the notice wrapped (and `overflow-wrap: anywhere`
+  // can put one inside a word), while the title attribute is the raw string.
+  const said = (await notice.innerText()).replace(/\s+/g, "");
+  assert.match(said, /Nooutboundselected/, `the field did not explain itself: ${said}`);
+  assert.match(
+    said,
+    /emptylistwouldmeaneveryoneofthem/,
+    `the Notice did not say why the state is refused: ${said}`,
+  );
+  assert.ok(await checkNow.isDisabled(), "'Check now' still enabled with nothing selected");
+  // The button says why it is dead, not just that it is: title is the same string
+  // the field carries (ExitChecksPage.tsx:489, `title={runProblem?.message}`),
+  // so a reader who never looks down at the box still learns what unchecking it
+  // cost them. Equality rather than a substring: a title that drifts from the
+  // Notice is a second, contradictory explanation of one refusal.
+  assert.equal(
+    (await checkNow.getAttribute("title"))?.replace(/\s+/g, ""),
+    said,
+    "the disabled button's title does not carry the field's explanation",
+  );
+
+  // THE POINT — nothing was sent. Both attempts are made for real, and a
+  // disabled button is expected to swallow both: Chromium drops click events
+  // targeted at disabled form controls, and React's own listener lookup returns
+  // null for onClick on a disabled button/input/select/textarea
+  // (react-dom-client getListener), so a dispatched event never reaches run()
+  // either. run() keeps its own second gate (ExitChecksPage.tsx:418,
+  // `runOutbounds === null`), but no click this test can make observes THAT
+  // half alone: a null list implies a non-null problem, which is what disabled
+  // the button, and the button's onClick is run()'s only call site — so the
+  // check is belt to the button's braces. What the two assertions below
+  // measure is therefore narrower and still the one with teeth: the gates only
+  // fail TOGETHER, and one POST here means all three let a round through.
+  const [before, beforeNewest, beforeSettled] = await settledHistory();
+  assert.ok(
+    beforeSettled,
+    `the exit-check history was still moving after 15 one-second polls (last read: ${before} rows, newest ${beforeNewest}), so there is no stable baseline to compare a refused run against — this is the test above's round still landing rows, not anything the click below did`,
+  );
+  const posted = [];
+  const onRequest = (req) => {
+    if (req.url().includes("/api/exit-checks/run")) posted.push(`${req.method()} ${req.url()}`);
+  };
+  page.on("request", onRequest);
+  // Each attempt is recorded rather than allowed to throw the test out: a
+  // control that swallows the click is the behaviour under test, and Playwright
+  // refusing to click a disabled button is the same refusal proven from the
+  // other side. What must never happen is a POST reaching the engine, which is
+  // what the two assertions below measure. Each one gets its own try, so an
+  // attempt that throws still leaves the OTHER attempt made — the two gates
+  // (the browser's, React's) are exercised independently.
+  const attempt = async (what, fn) => {
+    try {
+      await fn();
+      return "swallowed";
+    } catch (err) {
+      return `${what} refused: ${String(err?.message ?? err).split("\n")[0]}`;
+    }
+  };
+  const realClick = await attempt("Playwright", () => checkNow.click({ force: true }));
+  const synthetic = await attempt("the dispatched click", () =>
+    checkNow.dispatchEvent("click"),
+  );
+  // Both halves of "nothing was sent" need the page to have stopped talking to
+  // the engine before they are read: the log, so a POST the click DID make is in
+  // it, and the history, so a round it DID start has had its turn to record.
+  // networkidle is what the rest of this file waits on and it settles by itself.
+  await page.waitForLoadState("networkidle");
+  page.off("request", onRequest);
+  // The assertion with teeth. Every gate the page has — the disabled button, the
+  // React listener it filters out, run()'s own null check — has to fail together
+  // before this endpoint is reached, and one POST here is a round the reader
+  // asked the picker not to run.
+  assert.deepEqual(
+    posted,
+    [],
+    `the refused run reached the engine's run endpoint (real click ${realClick}, synthetic ${synthetic})`,
+  );
+  // The engine-side half, and on the CI fixture the weaker of the two: the only
+  // outbound configured there is "direct-1", which has no server address, so the
+  // engine skips it and a round that DID start would record nothing either way
+  // (internal/exitip/manager.go, `if o.Address() == ""`). On an engine with a
+  // real proxy behind it this is the assertion that names the damage — rows a
+  // round nobody asked for wrote into the history.
+  const [after, afterNewest, afterSettled] = await settledHistory();
+  // Not settling HERE is itself the failure: the baseline was quiet, so rows
+  // still landing means a round started — the refused click's, since the only
+  // thing between the two readings is the two clicks on a disabled button.
+  assert.ok(
+    afterSettled,
+    `the exit-check history started moving after the refused click and was still moving 15 polls later (was ${before} rows / newest ${beforeNewest}, now ${after} rows / newest ${afterNewest}; real click ${realClick}, synthetic ${synthetic}) — a round nobody asked for is recording rows`,
+  );
+  assert.deepEqual(
+    [after, afterNewest],
+    [before, beforeNewest],
+    `the refused run recorded exit-check rows on the engine — ${before} rows, newest ${beforeNewest}, became ${after} rows, newest ${afterNewest} (real click ${realClick}, synthetic ${synthetic})`,
+  );
+
+  // One click gets the run back: the guard is about the state, not the field.
+  await pick(first);
+  await page.waitForSelector(`${chipSel(first)}.on`, { timeout: 5_000 });
+  assert.match(await pill.innerText(), /^1 outbound$/, "pill does not count one outbound");
+  assert.equal(await notice.count(), 0, "the nothing-selected Notice outlived the selection");
+  assert.ok(await checkNow.isEnabled(), "'Check now' still disabled with one outbound picked");
+  // Stopped here on purpose: pressing it would run a real round against a live
+  // check site, and the test above already covers the run itself.
+});
+
 await test("probe page renders the run form and a history or an explanation", async () => {
   await page.goto(`${BASE}/probes`, { waitUntil: "networkidle" });
   const bodyText = await page.locator("main").innerText();
