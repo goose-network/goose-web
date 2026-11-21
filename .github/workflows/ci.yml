@@ -86,6 +86,30 @@ jobs:
           GOOSE_NO_DEFAULT_PROVIDER: "1"
         run: |
           mkdir -p /tmp/goose-e2e
+          # The pools below are dirty on purpose, and TWO assertions in
+          # e2e/run-e2e.mjs depend on the same repeat — trimming pool-default to
+          # one direct-1 keeps every badge green (declared 2 > live 1) while
+          # killing the failover round at its own premise guard, because that is
+          # the only pool on this fixture that BUILDS more than one member.
+          # (1) The probe page's pool chip: pool-default names direct-1 TWICE
+          # plus an id no outbound has, so its member-count badge reads 1 only
+          # once ProbesPage's poolChipGroups has deduped the list and filtered
+          # it to configured outbounds — both steps the engine cannot do for it,
+          # since /api/pools serves outbound_ids verbatim
+          # (internal/config/store.go does no cleaning).
+          # (2) "a pool round that fails over numbers every dial it made": the
+          # router appends every resolvable pool id WITHOUT deduping
+          # (internal/router/router.go, `if o, ok := r.outbounds[id]; ok`), so
+          # the repeated direct-1 is what turns one server into two dial
+          # attempts, and attempt numbering only exists on a dial that fails
+          # over. Same list, two opposite readings on purpose — the picker
+          # counts distinct routes to probe, the router counts dials to try.
+          # pool-ghost names only ids that do not exist,
+          # which gives the "a pool with no configured member renders no
+          # member-expanding chip" branch a subject: it stays a plain chip that
+          # selects itself. The engine tolerates both, because it skips pool
+          # members it cannot resolve when it builds a pool
+          # (internal/router/router.go, `if o, ok := r.outbounds[id]; ok`).
           cat > /tmp/goose-e2e/config.json <<'JSON'
           {
             "engine": {
@@ -100,7 +124,8 @@ jobs:
               { "id": "direct-1", "protocol": "direct", "config": {} }
             ],
             "pools": [
-              { "id": "pool-default", "outbound_ids": ["direct-1"], "selector": { "type": "random", "params": {} } }
+              { "id": "pool-default", "outbound_ids": ["direct-1", "direct-1", "e2e-not-configured"], "selector": { "type": "random", "params": {} } },
+              { "id": "pool-ghost", "outbound_ids": ["nope-1", "nope-2"], "selector": { "type": "random", "params": {} } }
             ],
             "chains": [
               { "id": "chain-default", "layers": ["pool-default"] }

@@ -816,14 +816,176 @@ await test("metrics page renders the dashboard", async () => {
   await row.locator(".path-detail summary").click();
   await row.locator(".path-legs .path-leg").first().waitFor({ timeout: 5_000 });
 
-  // WHY there is no failover assertion here: multi-attempt paths come from
-  // dialPoolSnapshot, which numbers its attempts as it walks a pool's members.
-  // This CI engine is configured with one outbound ("direct-1") in one pool
-  // ("pool-default"), so the attempt counter can never get past 1 and a graph
-  // with a second attempt node is unreachable from a live run. Failover is not
-  // left untested, it is untestable against THIS engine: shape (b) in
-  // e2e/fixtures.mjs stubs a refused attempt 1 and a winning attempt 2 so the
-  // strip and its pane have a multi-attempt graph to draw.
+  // WHY this row has no attempt to number: it is a DISPATCH, and the dispatch
+  // path picks one member per chain layer and dials that one. Attempt numbering
+  // comes from dialPoolSnapshot, which only a pool ROUTE dial walks
+  // (internal/router/upstream.go) — so it is a route-dial fact, not something
+  // every row can carry.
+  //
+  // It is not unreachable from a live run, and the run that reaches it is
+  // asserted below rather than excused here: "a pool round that fails over
+  // numbers every dial it made" drives a round through the fixture's
+  // repeated-member pool and checks both attempts on the wire and on the pixels.
+  // shape (b) in e2e/fixtures.mjs covers the half a round where nothing won
+  // cannot: a failover with a WINNER, where the strip takes the attempt that got
+  // through and the pane keeps the one that did not.
+});
+
+await test("a pool round that fails over numbers every dial it made", async () => {
+  // The premise, computed rather than assumed: attempts only get numbered when a
+  // pool BUILDS more than one member, and the router builds one member per id it
+  // can resolve without deduping (internal/router/router.go appends every `ok`
+  // hit), so pool-default's repeated direct-1 builds two candidates out of a
+  // single server. ProbesPage.poolChipGroups dedupes the very same list for the
+  // chip badge the probe test below reads — the picker counts distinct routes to
+  // probe, the router counts dials to try, and only the second can fail over.
+  const [pools, outbounds] = [await api("pools"), await api("outbounds")];
+  const configured = new Set(outbounds.map((o) => o.id).filter(Boolean));
+  const failover = pools
+    .filter((p) => typeof p?.id === "string" && p.id !== "")
+    .map((p) => ({
+      ref: `pool:${p.id}`,
+      // What the router builds: every declared id that resolves, repeats kept.
+      built: (Array.isArray(p.outbound_ids) ? p.outbound_ids : []).filter((id) =>
+        configured.has(id),
+      ),
+    }))
+    .find((p) => p.built.length > 1);
+  assert.ok(
+    failover !== undefined,
+    "no pool builds to more than one member, so no live round can fail over — " +
+      '.github/workflows/ci.yml declares pool-default as ["direct-1","direct-1",' +
+      '"e2e-not-configured"] for exactly this',
+  );
+
+  // Port 9 (discard) is closed here and on the CI runner, so every dial is
+  // refused in microseconds: no external network, no dial timeout to wait out,
+  // and a failure the pool has to walk PAST rather than stop at.
+  const target = "http://127.0.0.1:9/";
+  const ran = await apiPost("probes/run", {
+    routes: [failover.ref],
+    targets: [target],
+    method: "GET",
+    timeout_seconds: 5,
+  });
+  const row = Array.isArray(ran) ? ran.find((r) => r?.route === failover.ref) : undefined;
+  assert.ok(row !== undefined, `POST /api/probes/run returned no row for ${failover.ref}`);
+  assert.equal(
+    row.success,
+    false,
+    `${target} answered, so the round proved nothing about failover — the target has to refuse`,
+  );
+
+  // --- the wire first: one proxy node per dial, numbered from 1 ---
+  const nodes = row.path?.nodes ?? [];
+  const attempts = nodes.filter((n) => n.kind === "proxy").map((n) => n.attempt);
+  assert.deepEqual(
+    attempts,
+    failover.built.map((_, i) => i + 1),
+    `${failover.ref} built ${failover.built.length} member(s) but recorded attempts [${attempts}]`,
+  );
+
+  // --- then the pixels, on the card that keeps every recorded round ---
+  await page.goto(`${BASE}/probes`, { waitUntil: "networkidle" });
+  const history = page.locator("main .card:has(h2:has-text('History'))");
+  await history.waitFor({ timeout: 10_000 });
+  // Narrow to this route, then take the newest: the History table is newest
+  // first, and the route filter is what keeps an earlier round's row from being
+  // read as this one's. The dropdown is built from the rows the fetch brought
+  // back, so wait for the option rather than racing the request — "attached",
+  // because an <option> inside a closed <select> is never "visible".
+  await page.waitForSelector(
+    `#probe-history-route option[value="${failover.ref}"]`,
+    { state: "attached", timeout: 10_000 },
+  );
+  await history.locator("#probe-history-route").selectOption(failover.ref);
+  const hrow = history.locator("tbody tr", { hasText: target }).first();
+  await hrow.locator(".path-strip").waitFor({ timeout: 10_000 });
+
+  // The strip draws ONE attempt, not both: buildPathView takes the leg that
+  // actually carried the request onward and, when none did, the LAST one — the
+  // furthest attempt the row got to (pathGraph.ts, pinned by pathGraph.test.ts's
+  // "takes the last attempt when none of them succeeded"). So attempt 2 is the
+  // chip and attempt 1 is pane material.
+  const chips = hrow.locator(".path-strip .path-node.kind-proxy");
+  assert.equal(
+    await chips.count(),
+    1,
+    "the strip drew a chip per attempt instead of the one the row gave up on",
+  );
+  assert.equal(
+    await chips.first().locator("sup.path-attempt").innerText(),
+    String(failover.built.length),
+    "the strip's proxy chip is not the last attempt",
+  );
+  // Nothing arrived, so the chip is muted: `reached` means a SUCCESSFUL leg
+  // pointed at this node, and no leg did.
+  assert.match(
+    (await chips.first().getAttribute("class")) ?? "",
+    /\bunreached\b/,
+    "a dial that was refused drew as an arrival",
+  );
+
+  // The pane's headline counts the dials before it lists them, which is the only
+  // place a reader learns the pool tried twice without opening anything.
+  assert.match(
+    await hrow.locator(".path-detail summary").innerText(),
+    new RegExp(
+      `${failover.built.length} legs · ${failover.built.length} failed`,
+    ),
+    "the pane's headline did not count every dial",
+  );
+  await hrow.locator(".path-detail summary").click();
+  await hrow.locator(".path-legs .path-leg").first().waitFor({ timeout: 5_000 });
+
+  const legs = hrow.locator(".path-legs .path-leg");
+  assert.equal(
+    await legs.count(),
+    failover.built.length,
+    "the pane did not keep one leg per dial",
+  );
+  // Every attempt but the strip's stays in the pane, marked off-strip in the
+  // class as well as in words — colour is not the only signal, and neither is
+  // the strip.
+  const offStrip = hrow.locator(".path-legs .path-leg.off-strip");
+  assert.equal(
+    await offStrip.count(),
+    failover.built.length - 1,
+    "every attempt but the strip's belongs in the pane as off-strip",
+  );
+  assert.match(
+    await offStrip.first().innerText(),
+    /not shown on the path above/,
+    "the off-strip leg does not say it is off the strip",
+  );
+  // And the loser keeps its own explanation rather than inheriting the row's:
+  // the classified words plus the engine's raw error, which is what tells two
+  // dials of the SAME server apart when their labels are identical.
+  assert.ok(
+    (await offStrip.first().locator(".path-leg-why").innerText()).trim() !== "",
+    "the losing leg lost its classified failure",
+  );
+  assert.equal(
+    await offStrip.first().locator(".path-leg-err").count(),
+    1,
+    "the losing leg lost the engine's raw error",
+  );
+
+  // The node table is the one view where both attempts are visible together, so
+  // it has to list every node the engine recorded — including the target no leg
+  // ever reached — and number the ones that were one of several.
+  assert.equal(
+    await hrow.locator(".path-nodes tbody tr").count(),
+    nodes.length,
+    "the node table drew a row for something the engine did not record, or dropped one it did",
+  );
+  assert.deepEqual(
+    (await hrow.locator(".path-nodes tbody tr td.num").allInnerTexts())
+      .filter((n) => n !== "—")
+      .sort(),
+    failover.built.map((_, i) => String(i + 1)),
+    "the node table did not number every attempt",
+  );
 });
 
 await test("exit IP page renders checks or its empty state", async () => {
@@ -1191,56 +1353,131 @@ await test("probe routes: 'every outbound' unchecks everything, and a pool selec
   // A pool chip selects ALL of that pool's outbounds, because probing through
   // "pool:…" itself rides whichever member the selector picks — one click has
   // to name the members for the round to say anything about the pool.
-  const pools = (await api("pools")).filter(
-    (p) => Array.isArray(p.outbound_ids) && p.outbound_ids.length > 0,
+  //
+  // Every pool is covered, in whatever order /api/pools returns them, and the
+  // expectations are computed here the way ProbesPage.poolChipGroups computes
+  // them: refs to blank ids dropped, repeats counted once (matching cleanList,
+  // and the engine, whose probeRoutes drops repeats too), ids the engine has no
+  // outbound for dropped (internal/router/router.go, `if o, ok := r.outbounds[id];
+  // ok` skips them when it builds the pool), and a pool left with no member
+  // getting no group at all — which is NOT the same as no chip.
+  const pools = await api("pools");
+  const configured = new Set(outbounds.map((o) => `outbound:${o.id}`));
+  const poolRefs = pools
+    .filter((p) => typeof p?.id === "string" && p.id !== "")
+    .map((p) => {
+      const raw = Array.isArray(p.outbound_ids) ? p.outbound_ids : [];
+      // `declared` is the count /api/pools serves verbatim (internal/config/
+      // store.go does no cleaning), `live` what a click on the chip selects.
+      const live = [
+        ...new Set(
+          raw
+            .filter((id) => typeof id === "string" && id !== "")
+            .map((id) => `outbound:${id}`),
+        ),
+      ].filter((m) => configured.has(m));
+      return { ref: `pool:${p.id}`, declared: raw.length, live };
+    });
+  assert.ok(poolRefs.length > 0, "engine reports no pool for the route picker to offer");
+  // Premise guard, stated before the badges are read: a pool whose declared
+  // members all survive the two cuts cannot tell a correct badge from a
+  // hardcoded "1", so the fixture has to stay dirty. .github/workflows/ci.yml
+  // declares pool-default as ["direct-1","direct-1","e2e-not-configured"] and
+  // pool-ghost as ["nope-1","nope-2"] for exactly this — a future fixture that
+  // tidies them up stops here, named, instead of leaving a pool-chip failure to
+  // be diagnosed out of the DOM.
+  const dirty = poolRefs.filter((g) => g.declared > g.live.length);
+  assert.ok(
+    dirty.length > 0,
+    `every pool's declared members survive ProbesPage's dedupe and its filter to configured outbounds (${poolRefs
+      .map((g) => `${g.ref}: ${g.declared} declared / ${g.live.length} live`)
+      .join(", ")}), so the badge proves nothing — .github/workflows/ci.yml has to keep a pool naming a repeat and an id no outbound has`,
   );
-  if (pools.length > 0) {
-    const pool = pools[0];
-    const poolRef = `pool:${pool.id}`;
-    // Members the engine has configured; ProbesPage drops refs to ids that are
-    // not in /api/outbounds, so a pool naming a deleted outbound is skipped —
-    // and it counts a repeated id once, matching the dedupe the page applies.
-    const members = [...new Set(pool.outbound_ids.map((id) => `outbound:${id}`))];
-    const configured = new Set(outbounds.map((o) => `outbound:${o.id}`));
-    const live = members.filter((m) => configured.has(m));
-    assert.ok(live.length > 0, `${poolRef} has no configured member to select`);
+  assert.ok(
+    poolRefs.some((g) => g.live.length === 0),
+    `every pool in /api/pools has a configured member, so the "a pool with no member gets no group, and its chip selects itself" branch has no subject — .github/workflows/ci.yml declares pool-ghost (["nope-1","nope-2"]) for it`,
+  );
 
-    // Clear the explicit list first, so the click is the pool's alone.
-    await click(extra);
-    await page.waitForSelector(`${chipSel(extra)}.on`, { state: "detached", timeout: 5_000 });
+  // Clear the explicit list first, so every pool's click below is its own: each
+  // pass starts from nothing selected and ends that way again.
+  await click(extra);
+  await page.waitForSelector(`${chipSel(extra)}.on`, { state: "detached", timeout: 5_000 });
+  assert.ok(await runBtn.isDisabled(), "'Probe now' enabled with nothing selected");
 
-    await click(poolRef);
-    await page.waitForSelector(`${chipSel(poolRef)}.on`, { timeout: 5_000 });
-    for (const m of live) {
+  for (const g of poolRefs.filter((x) => x.live.length > 0)) {
+    assert.equal(
+      await checkedCount(),
+      0,
+      `${g.ref}: the pass before it left a chip checked, so its click is not its own`,
+    );
+    await click(g.ref);
+    await page.waitForSelector(`${chipSel(g.ref)}.on`, { timeout: 5_000 });
+    for (const m of g.live) {
       await reveal(m);
-      assert.equal(await checked(chipSel(m)), true, `${poolRef} did not select ${m}`);
+      assert.equal(await checked(chipSel(m)), true, `${g.ref} did not select ${m}`);
     }
     // The chip says what one click on it commits to, so a pool of 40 does not
-    // read as one route among hundreds.
+    // read as one route among hundreds. `live.length` rather than `declared`:
+    // the badge is the page's own dedupe-and-filter result, which is the whole
+    // reason the CI fixture names direct-1 twice plus an id no outbound has.
     //
     // Re-reveal the pool chip first: the member checks above left the filter on
     // a member ref, and past FILTER_AT a selection is pinned into the filtered
     // view only by its own refs — which are the MEMBERS, never the pool chip.
     // Without this, on a fleet the pool chip is not in the DOM at all and the
     // badge read times out instead of reporting a wrong count.
-    await reveal(poolRef);
-    const badge = page.locator(`${chipSel(poolRef)} .chip-count`);
+    await reveal(g.ref);
+    const badge = page.locator(`${chipSel(g.ref)} .chip-count`);
     assert.equal(
       await badge.innerText(),
-      String(live.length),
-      `${poolRef} does not show its member count`,
+      String(g.live.length),
+      `${g.ref} does not show its member count (it declares ${g.declared} ids, ${g.live.length} of them configured)`,
     );
     assert.match(
       await pill.innerText(),
-      new RegExp(`${live.length} route${live.length === 1 ? "" : "s"}$`),
-      "pill does not count the pool's members",
+      new RegExp(`${g.live.length} route${g.live.length === 1 ? "" : "s"}$`),
+      `${g.ref}: pill does not count the pool's members`,
     );
     // … and one more click takes them all back out, leaving nothing selected.
     // (`click` reveals the chip first, so the filter the member loop left on a
     // member ref cannot hide it.)
-    await click(poolRef);
-    await page.waitForSelector(`${chipSel(poolRef)}.on`, { state: "detached", timeout: 5_000 });
-    assert.ok(await runBtn.isDisabled(), "'Probe now' enabled after unselecting the pool");
+    await click(g.ref);
+    await page.waitForSelector(`${chipSel(g.ref)}.on`, { state: "detached", timeout: 5_000 });
+    assert.ok(await runBtn.isDisabled(), `'Probe now' enabled after unselecting ${g.ref}`);
+  }
+
+  // The dropped branch, asserted as what the CODE does rather than as a chip
+  // that is missing: `pool:<id>` is a legal route reference in its own right, so
+  // ProbesPage still lists it in `choices` and ChipPicker still renders it —
+  // what poolChipGroups withheld is the GROUP, and ChipPicker's `covers` falls
+  // back to [ref] for a chip no group claims. So the chip is there, carries no
+  // member badge (it commits to nothing but itself), and one click selects it
+  // alone. A round through it rides a pool the engine built from members it
+  // could not resolve, which is the engine's to explain, not the picker's to
+  // hide.
+  for (const g of poolRefs.filter((x) => x.live.length === 0)) {
+    assert.equal(
+      await checkedCount(),
+      0,
+      `${g.ref}: the pass before it left a chip checked, so its click is not its own`,
+    );
+    await click(g.ref);
+    await page.waitForSelector(`${chipSel(g.ref)}.on`, { timeout: 5_000 });
+    assert.equal(
+      await page.locator(`${chipSel(g.ref)} .chip-count`).count(),
+      0,
+      `${g.ref} advertises a member count for a pool with no configured member`,
+    );
+    assert.equal(await checkedCount(), 1, `${g.ref} selected more than itself`);
+    assert.match(
+      await pill.innerText(),
+      /1 route$/,
+      `${g.ref}: pill does not count the one route its chip selects`,
+    );
+    assert.ok(await runBtn.isEnabled(), `'Probe now' disabled with ${g.ref} selected`);
+    await click(g.ref);
+    await page.waitForSelector(`${chipSel(g.ref)}.on`, { state: "detached", timeout: 5_000 });
+    assert.ok(await runBtn.isDisabled(), `'Probe now' enabled after unselecting ${g.ref}`);
   }
 
   // Checking the all-chip returns to all-mode and drops the explicit list:

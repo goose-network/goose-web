@@ -123,6 +123,72 @@ interface RouteChoices {
 const ROW_OPTIONS = [100, 200, 500, 1000, 5000];
 const PAGE = 50;
 
+/** One route reference in the form the engine's own specs take — `outbound:<id>`,
+ *  `pool:<id>`, `chain:<id>`. Both the picker and a stored probe's `routes`
+ *  speak this format, so it is built in exactly one place. An id the engine left
+ *  blank or absent (every id is optional on the wire) drops out rather than
+ *  becoming a bare `outbound:`, which would name nothing and read as a route. */
+function routeRefs(
+  ids: ReadonlyArray<string | undefined>,
+  kind: string,
+): string[] {
+  return ids
+    .filter((id): id is string => id !== undefined && id !== "")
+    .map((id) => `${kind}:${id}`);
+}
+
+/**
+ * poolChipGroups builds the probe picker's pool chips: one per pool, carrying
+ * the member outbounds that a single click on that chip selects.
+ *
+ * A pool chip selects its members rather than "pool:<id>", because probing
+ * through a pool runs that pool's real selector and picks ONE member — a round
+ * that says almost nothing about the other three hundred. A chip's member list
+ * is therefore the pool's declared membership minus everything a round could
+ * not actually run, and each of the four cuts below is a claim the chip's
+ * count makes about that round:
+ *
+ *  - A pool with no usable id gets no group. The SDK's `id` is optional, so a
+ *    list can carry entries without one, and `pool:` is not a chip anyone can
+ *    select.
+ *  - A repeated member counts once. A pool can name one outbound twice: the
+ *    pools editor does not clean the list, and a provider-fed pool gains a
+ *    repeat when two providers emit the same id into it. A repeat would inflate
+ *    the chip's member count and hand the round the same route twice — the
+ *    engine runs it once, since `probeRoutes` drops repeats
+ *    (internal/router/httpprobe.go). The first occurrence keeps its place,
+ *    matching `cleanList`.
+ *  - A member the engine does not have configured drops out. A pool can name an
+ *    id that was deleted, and a ref to a nonexistent outbound is a round that
+ *    fails for a reason the reader did not choose. The router agrees that such
+ *    a member is not part of the pool: it skips ids it cannot resolve when it
+ *    builds one (internal/router/router.go, `if o, ok := r.outbounds[id]; ok`).
+ *  - A pool left with no member gets no group at all, rather than an empty one.
+ *    Its chip is still offered — `pool:<id>` is a legal route reference in its
+ *    own right, and a chip with no group falls back to selecting itself
+ *    (ChipPicker's `covers`) — so what this drops is the member expansion, not
+ *    the pool.
+ */
+export function poolChipGroups(
+  pools: ReadonlyArray<
+    { id?: string; outbound_ids?: string[] } | null | undefined
+  >,
+  outboundIds: ReadonlyArray<string | undefined>,
+): ChipGroup[] {
+  const configured = new Set(routeRefs(outboundIds, "outbound"));
+  return pools
+    .filter(
+      (p): p is NonNullable<typeof p> => p?.id !== undefined && p.id !== "",
+    )
+    .map((p) => ({
+      ref: `pool:${p.id}`,
+      members: [...new Set(routeRefs(p.outbound_ids ?? [], "outbound"))].filter(
+        (r) => configured.has(r),
+      ),
+    }))
+    .filter((g) => g.members.length > 0);
+}
+
 export function ProbesPage() {
   const { goose } = useSdk();
   const [form, setForm] = useState<ProbeForm>(INITIAL_FORM);
@@ -152,44 +218,26 @@ export function ProbesPage() {
   // Fetched once here, above both cards, so the run form's picker and the
   // schedule's cap estimate cannot disagree about the fleet.
   const routes = useMemo<RouteChoices>(() => {
-    const refs = (ids: Array<string | undefined>, kind: string) =>
-      ids
-        .filter((id): id is string => id !== undefined && id !== "")
-        .map((id) => `${kind}:${id}`);
-    const outboundRefs = refs(
-      (resources.data?.[0] ?? []).map((o) => o.id),
-      "outbound",
-    );
-    // A pool chip selects its members rather than "pool:<id>", because probing
-    // through a pool runs that pool's real selector and picks ONE member — a
-    // round that says almost nothing about the other three hundred. Members are
-    // restricted to outbounds the engine actually has configured: a pool can
-    // name an id that was deleted, and a ref to a nonexistent outbound is a
-    // round that fails for a reason the reader did not choose.
-    const configured = new Set(outboundRefs);
-    const groups = (resources.data?.[1] ?? [])
-      .filter((p): p is NonNullable<typeof p> => p.id !== undefined && p.id !== "")
-      .map((p) => ({
-        ref: `pool:${p.id}`,
-        // Deduped, because a pool can name one outbound twice: the pools editor
-        // does not clean the list, and a provider-fed pool gains a repeat when
-        // two providers emit the same id into it. A repeat would inflate the
-        // chip's member count and hand the round the same route twice — the
-        // engine runs it once, since `probeRoutes` drops repeats.
-        members: [...new Set(refs(p.outbound_ids ?? [], "outbound"))].filter((r) =>
-          configured.has(r),
-        ),
-      }))
-      .filter((g) => g.members.length > 0);
+    // `?.` on every row, not just the pools': all three lists arrive off the
+    // wire, and this memo runs inside render with no error boundary above it —
+    // one null row would otherwise take down the whole page, not just one
+    // picker. routeRefs and poolChipGroups both drop what has no usable id.
+    const outboundIds = (resources.data?.[0] ?? []).map((o) => o?.id);
+    const outboundRefs = routeRefs(outboundIds, "outbound");
+    const pools = resources.data?.[1] ?? [];
     return {
+      // Every pool is listed here, including one poolChipGroups dropped for
+      // having no configured member: `pool:<id>` stays a legal route reference
+      // in its own right, and a chip with no group behind it selects itself
+      // (ChipPicker's `covers`) instead of expanding to members.
       choices: [
         ...outboundRefs,
-        ...refs((resources.data?.[1] ?? []).map((p) => p.id), "pool"),
-        ...refs((resources.data?.[2] ?? []).map((c) => c.id), "chain"),
+        ...routeRefs(pools.map((p) => p?.id), "pool"),
+        ...routeRefs((resources.data?.[2] ?? []).map((c) => c?.id), "chain"),
         "direct",
       ],
       implied: outboundRefs,
-      groups,
+      groups: poolChipGroups(pools, outboundIds),
       loading: resources.loading,
       error: resources.error,
     };
