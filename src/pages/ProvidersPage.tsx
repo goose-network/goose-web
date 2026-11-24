@@ -18,8 +18,11 @@ import { StringList } from "../components/StringList";
 import { ProvidersStatusCard } from "./ProvidersStatusCard";
 import type { ProviderSpec } from "@goose-network/goose-sdk";
 
-const PLUGINS = ["subscription", "psiphon", "mihomo", "singbox"] as const;
-type Plugin = (typeof PLUGINS)[number];
+// Plugins offered in the dropdown. The engine is plugin-agnostic and can
+// surface others (auto-seeded zero-config providers, external plugins); the
+// form renders any plugin name through pluginHelp's fallback rather than
+// crashing on a key it does not know.
+const PLUGINS = ["subscription", "psiphon", "geph", "tor", "openrung", "mihomo", "singbox"] as const;
 
 export function ProvidersPage() {
   const { goose } = useSdk();
@@ -203,7 +206,13 @@ function ProviderForm({
   const set = (patch: Partial<ProviderSpec>) => setDraft({ ...draft, ...patch });
   const cfg = draft.config ?? {};
   const setCfg = (next: Record<string, unknown>) => set({ config: next });
-  const plugin = (draft.provider ?? "subscription") as Plugin;
+  const plugin = draft.provider ?? "subscription";
+  const help = pluginHelp(plugin);
+  // Keep the current plugin selectable even when it is not a built-in option,
+  // so editing an external provider shows its real plugin instead of a blank.
+  const pluginOptions: string[] = (PLUGINS as readonly string[]).includes(plugin)
+    ? [...PLUGINS]
+    : [...PLUGINS, plugin];
 
   return (
     <>
@@ -222,9 +231,9 @@ function ProviderForm({
         <SelectField
           id="prov-plugin"
           label="Plugin"
-          value={draft.provider ?? "subscription"}
-          options={[...PLUGINS]}
-          onChange={(provider) => set({ provider: provider as Plugin })}
+          value={plugin}
+          options={pluginOptions}
+          onChange={(provider) => set({ provider })}
         />
       </div>
       <div className="row">
@@ -244,9 +253,7 @@ function ProviderForm({
           mono
           value={typeof cfg.prefix === "string" ? cfg.prefix : ""}
           placeholder={`${plugin === "subscription" ? "sub" : plugin} (optional)`}
-          onChange={(prefix) =>
-            prefix === "" ? setCfg({ url: cfg.url }) : setCfg({ ...cfg, prefix })
-          }
+          onChange={(prefix) => setCfg(withPrefix(cfg, prefix))}
         />
       </div>
       <div className="row">
@@ -257,7 +264,7 @@ function ProviderForm({
           type="url"
           value={typeof cfg.url === "string" ? cfg.url : ""}
           error={fieldErrors.url}
-          placeholder={EXAMPLES[plugin].urlPlaceholder}
+          placeholder={help.urlPlaceholder}
           onChange={(url) => setCfg({ ...cfg, url })}
         />
         <TextField
@@ -294,7 +301,7 @@ interface PluginHelpInfo {
   example: { label: string; config: Record<string, unknown>; poolIds?: string[] };
 }
 
-const EXAMPLES: Record<Plugin, PluginHelpInfo> = {
+const EXAMPLES: Record<string, PluginHelpInfo> = {
   subscription: {
     urlPlaceholder: "https://example.com/sub",
     title: "subscription — generic subscription link",
@@ -322,6 +329,45 @@ const EXAMPLES: Record<Plugin, PluginHelpInfo> = {
     example: {
       label: "Example: out-of-the-box (empty config)",
       poolIds: ["psiphon-pool"],
+      config: {},
+    },
+  },
+  geph: {
+    urlPlaceholder: "(no config needed — leave blank)",
+    title: "geph — Geph circumvention network",
+    paragraphs: [
+      "Runs with zero configuration: leave every field empty and the provider connects to the Geph network through its embedded broker fronts and advertises the live exit roster — one outbound per exit node — so the Outbounds page shows the real exits and each can be pooled, pinned, or filtered. No subscription URL is involved.",
+      "Only set fields to customize: outbound_id (default “geph”) names the general outbound and prefixes the per-exit IDs; username/password or credentials select a custom Geph exit; config_path points at a geph5 config; cache relocates the broker/exit cache. The general “geph” outbound rides a live circuit, while the per-exit list represents the discovered exits.",
+    ],
+    example: {
+      label: "Example: out-of-the-box (empty config)",
+      poolIds: ["geph-pool"],
+      config: {},
+    },
+  },
+  tor: {
+    urlPlaceholder: "(no config needed — leave blank)",
+    title: "tor — Tor anonymity network",
+    paragraphs: [
+      "Runs with zero configuration: leave every field empty and the provider bootstraps a Tor circuit from the embedded directory authorities and advertises the exit roster — one outbound per exit relay (named <id>-<nickname>-<digest>) — so the Outbounds page shows the real exits. The general “tor” outbound rides a live circuit and appears once the guard link is up; no subscription URL is involved.",
+      "Only set fields to customize: outbound_id (default “tor”) names the general outbound and prefixes the per-exit IDs; upstream_proxy routes the directory fetch and guard link through another proxy when direct access is blocked; verify_signatures (default on) checks the consensus; path_len, allow_private_addresses and the timeout knobs tune circuit building.",
+    ],
+    example: {
+      label: "Example: out-of-the-box (empty config)",
+      poolIds: ["tor-pool"],
+      config: {},
+    },
+  },
+  openrung: {
+    urlPlaceholder: "(no config needed — leave blank)",
+    title: "openrung — OpenRung relay network",
+    paragraphs: [
+      "Runs with zero configuration: leave every field empty and the provider fetches the Ed25519-signed relay directory through the built-in broker fronts (Cloudflare → CloudFront → Azure, raced) and emits one mihomo-vless outbound per usable relay (VLESS + REALITY + Vision). No subscription URL is involved.",
+      "Only set fields to customize: limit caps the directory page size (the broker serves a random slice, so 20+ fetches the full rotation); prefix (default “openrung”) names the outbound IDs; broker_url overrides the broker; upstream_proxy routes broker traffic only — relay dials stay direct, because a REALITY ClientHello carries its camouflage SNI as the dial address and a TLS-sniffing forwarder would re-target it.",
+    ],
+    example: {
+      label: "Example: out-of-the-box (empty config)",
+      poolIds: ["openrung-pool"],
       config: {},
     },
   },
@@ -359,8 +405,49 @@ const EXAMPLES: Record<Plugin, PluginHelpInfo> = {
   },
 };
 
-function PluginHelp({ plugin }: { plugin: Plugin }) {
-  const info = EXAMPLES[plugin];
+// FALLBACK_HELP renders for any plugin without a tailored entry — an external
+// or newly-linked provider. The form must never crash on an unknown plugin
+// name (the engine is plugin-agnostic), so pluginHelp always returns a value.
+const FALLBACK_HELP: PluginHelpInfo = {
+  urlPlaceholder: "(plugin-specific — see its documentation)",
+  title: "provider plugin",
+  paragraphs: [
+    "This plugin retrieves its own proxy list and feeds the pools you assign. If it is zero-config, leave every field empty and it connects to its network out of the box; otherwise set the fields its documentation describes under “Extra config (advanced)” below.",
+  ],
+  example: { label: "Example: empty config", config: {} },
+};
+
+// pluginHelp returns the tailored guidance for a plugin, or the generic
+// fallback for any name without an entry. It never returns undefined:
+// indexing EXAMPLES directly with an unknown plugin (e.g. an auto-seeded
+// geph/tor/openrung provider) used to throw and white-screen the edit form.
+export function pluginHelp(plugin: string | undefined): PluginHelpInfo {
+  const key = plugin ?? "";
+  // Own-property check: a plain object literal inherits Object.prototype, so
+  // EXAMPLES["constructor"] / ["toString"] would return truthy prototype
+  // members and slip past a bare `?? FALLBACK_HELP`, crashing the render on
+  // info.paragraphs. Only a real entry counts; every other name — unknown
+  // plugin or prototype collision — gets the generic fallback.
+  const own = Object.prototype.hasOwnProperty.call(EXAMPLES, key) ? EXAMPLES[key] : undefined;
+  return own ?? FALLBACK_HELP;
+}
+
+// withPrefix sets the optional outbound-id prefix on a config map, or removes
+// just that key when cleared. Every other field survives: clearing the prefix
+// used to replace the whole config with {url}, silently dropping credentials,
+// limit, broker_url and the rest on save.
+export function withPrefix(
+  cfg: Record<string, unknown>,
+  prefix: string,
+): Record<string, unknown> {
+  const next = { ...cfg };
+  if (prefix === "") delete next.prefix;
+  else next.prefix = prefix;
+  return next;
+}
+
+function PluginHelp({ plugin }: { plugin: string }) {
+  const info = pluginHelp(plugin);
   return (
     <div className="field">
       <label>{info.title}</label>
