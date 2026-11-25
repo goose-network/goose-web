@@ -14,7 +14,7 @@
 // from the assertions they wrote, and the engine's own reachability verdicts
 // stay on the Outbounds and Metrics pages.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Engine } from "@goose-network/goose-sdk";
 import { useSdk } from "../sdk";
 import { errMessage, useAsync, useSeededDraft } from "../useAsync";
@@ -47,6 +47,7 @@ import {
   carriesBody,
   checkExpectations,
   ENGINE_PROBE_DEFAULTS,
+  expectedProbePairs,
   failureLabel,
   formatStatuses,
   hasExpectations,
@@ -55,8 +56,11 @@ import {
   parseRawRequest,
   parseStatuses,
   phaseLeg,
+  probePollDeadlineMs,
   probeResponse,
   probeRoundProblem,
+  probeRoundProgress,
+  probeRowsSince,
   PROBE_CAPS,
   PROBE_TARGET_PRESETS,
   REASON_LABELS,
@@ -71,6 +75,7 @@ import {
 import {
   listProbeResults,
   runProbes,
+  stillProbing,
   type HTTPProbe,
   type ProbeEngineProbes,
 } from "../runApi";
@@ -122,6 +127,20 @@ interface RouteChoices {
 // value matches no option renders with nothing selected.
 const ROW_OPTIONS = [100, 200, 500, 1000, 5000];
 const PAGE = 50;
+
+/** How often to look for a detached round's rows after the engine answers 202.
+ *  The round's own budget (probePollDeadlineMs) bounds how long the poll runs;
+ *  this is just the cadence, slow enough not to hammer the API. */
+const POLL_EVERY_MS = 3_000;
+
+/** Notice text while a detached round is in flight. The engine's own message
+ *  ("… results appear in GET /api/probes/results") is written for an API
+ *  reader, so the page says the same thing in its own words. */
+const STILL_PROBING =
+  "The round is still running — the engine stopped waiting for it after 25s. This card keeps looking for its results, and the history below refreshes as they are recorded.";
+
+const GAVE_UP_POLLING =
+  "The round had not recorded every result by the time its budget ran out. It may still be finishing — press Refresh on the history below to look again.";
 
 /** One route reference in the form the engine's own specs take — `outbound:<id>`,
  *  `pool:<id>`, `chain:<id>`. Both the picker and a stored probe's `routes`
@@ -200,6 +219,11 @@ export function ProbesPage() {
   // refreshes the other.
   const [ranAt, setRanAt] = useState(0);
   const onRan = useCallback(() => setRanAt((n) => n + 1), []);
+  // The newest history row's id, lifted from the history card so the run card
+  // can pick a detached round's rows out of the history by identity (see
+  // probeRowsSince). The history card reports it as its rows load.
+  const [newestId, setNewestId] = useState<string | undefined>(undefined);
+  const onNewestId = useCallback((id: string | undefined) => setNewestId(id), []);
 
   const resources = useAsync(
     () =>
@@ -249,9 +273,9 @@ export function ProbesPage() {
         title="Reachability probe"
         sub="Send a real HTTP request toward targets through chosen routes, assert on the response, and keep every result as a metric — once by hand, or on a schedule."
       />
-      <ProbeRunCard form={form} patch={patch} onRan={onRan} routes={routes} />
+      <ProbeRunCard form={form} patch={patch} onRan={onRan} routes={routes} newestId={newestId} />
       <ScheduledProbeCard form={form} estimatedRoutes={routes.implied.length} />
-      <ProbeHistoryCard ranAt={ranAt} />
+      <ProbeHistoryCard ranAt={ranAt} onNewestId={onNewestId} />
     </>
   );
 }
@@ -265,11 +289,14 @@ function ProbeRunCard({
   patch,
   onRan,
   routes: routeChoices,
+  newestId,
 }: {
   form: ProbeForm;
   patch: (p: Partial<ProbeForm>) => void;
   onRan: () => void;
   routes: RouteChoices;
+  /** newest history row when the run started — see probeRowsSince */
+  newestId: string | undefined;
 }) {
   const { goose } = useSdk();
   const { toast } = useToast();
@@ -277,6 +304,7 @@ function ProbeRunCard({
   const [outcome, setOutcome] = useState<RunOutcome | null>(null);
   const [running, setRunning] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
+  const [pending, setPending] = useState<string | null>(null);
 
   // The engine rejects an over-cap round outright, and one click on a pool chip
   // is the easiest way to make one: a 600-outbound pool names all 600 routes.
@@ -289,11 +317,97 @@ function ProbeRunCard({
     routeChoices.implied.length,
   );
 
+  // Polling timers for a detached round. `alive` and `runSeq` fence the chain:
+  // a timer that already fired can resume from an in-flight fetch after the
+  // card unmounted or a newer run started, and must neither re-arm nor write
+  // into the state that newer run now owns. The setup re-arms `alive` because
+  // StrictMode and HMR run the cleanup on a simulated unmount and keep the refs
+  // — a cleanup-only effect would leave the card dead for the session.
+  const timers = useRef<number[]>([]);
+  const alive = useRef(true);
+  const runSeq = useRef(0);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      for (const t of timers.current) window.clearTimeout(t);
+      timers.current = [];
+    };
+  }, []);
+  const after = (ms: number, fn: () => void) => {
+    timers.current.push(window.setTimeout(fn, ms));
+  };
+  /** A chain is retired once the card unmounts or a newer run starts: from
+   *  there on it must neither re-arm a timer nor write into the state the
+   *  newer run (or the next page) owns. */
+  const retired = (myRun: number) => !alive.current || myRun !== runSeq.current;
+
+  /** The completed-round path, shared by an inline answer and a polled one. */
+  const finish = (probes: HTTPProbe[], expectations: Expectations) => {
+    setOutcome({ probes, expectations });
+    setPending(null);
+    const answered = probes.filter((p) => p.success === true).length;
+    toast(
+      probes.length +
+        " probe" +
+        (probes.length === 1 ? "" : "s") +
+        " run — " +
+        answered +
+        " got a response",
+      answered === probes.length ? "good" : "bad",
+    );
+  };
+
+  /** Look for a detached round's rows, refreshing the history each tick so the
+   *  table below stays live whether or not this card has found them all. The
+   *  results card fills progressively as rows land; the chain stops when every
+   *  expected (route, target) pair is present, or when the round's budget (the
+   *  deadline) runs out — whichever comes first. `myRun` fences the chain: any
+   *  newer run (or an unmount) retires it wherever it is. */
+  const poll = (
+    myRun: number,
+    baseline: string | undefined,
+    startedAt: number,
+    expected: Set<string>,
+    expectations: Expectations,
+    deadline: number,
+  ) => {
+    after(POLL_EVERY_MS, () => {
+      if (retired(myRun)) return;
+      onRan();
+      void (async () => {
+        try {
+          const n = Math.min(10000, Math.max(200, expected.size + 50));
+          const rows = await listProbeResults(goose, { n });
+          if (retired(myRun)) return;
+          const mine = probeRowsSince(rows, baseline, startedAt);
+          const progress = probeRoundProgress(mine, expected);
+          if (progress.rows.length > 0) {
+            setOutcome({ probes: progress.rows, expectations });
+          }
+          if (progress.complete) {
+            finish(progress.rows, expectations);
+            return;
+          }
+        } catch {
+          // The history below surfaces its own load error; keep looking.
+        }
+        if (retired(myRun)) return;
+        if (Date.now() < deadline) {
+          poll(myRun, baseline, startedAt, expected, expectations, deadline);
+        } else {
+          setPending(GAVE_UP_POLLING);
+        }
+      })();
+    });
+  };
+
   const run = async () => {
-    // Whatever happens next, the previous round's table is not the answer to
-    // this attempt — clear it before validation can bail out, or a rejected
-    // run would leave the old results reading as this run's.
-    setOutcome(null);
+    // Validate before touching any state: a rejected re-click must leave a live
+    // detached round's table and "still probing" notice intact — its poll chain
+    // is not retired here, so clearing now would wipe the notice for the rest of
+    // the round while the next tick restores the table. ExitChecksPage gates
+    // before it clears for the same reason.
     const spec = buildProbeSpec(form);
     // The engine rejects the whole round for one bad target, so say which one
     // here instead of after a round trip.
@@ -311,21 +425,50 @@ function ProbeRunCard({
       return;
     }
 
+    // Retire any chain still looking for an earlier detached round, or its next
+    // tick would read this run's rows as that round's and overwrite the table.
+    runSeq.current += 1;
+    const myRun = runSeq.current;
+    for (const t of timers.current) window.clearTimeout(t);
+    timers.current = [];
+    // Captured before the request: the history this card is handed moves while
+    // a round is in flight, and probeRowsSince needs the pre-run newest row.
+    const baseline = newestId;
+    const startedAt = Date.now();
+    // The pairs this round will record and how long to wait for them. All-mode
+    // omits the route list, so the implied refs (an upper bound on the built
+    // fleet) stand in; the deadline is the fallback when the engine builds fewer.
+    const expected = expectedProbePairs(spec.targets, spec.routes ?? routeChoices.implied);
+    const expectations = buildExpectations(form.expect);
+    const deadline = startedAt + probePollDeadlineMs(expected.size, spec.timeout_seconds ?? 0);
+
     setRunning(true);
     setRunError(null);
+    // Validation passed and any earlier chain is retired: only now is the
+    // previous round's table not this attempt's answer, so clear it.
+    setOutcome(null);
+    setPending(null);
     try {
       const res = await runProbes(goose, spec);
-      setOutcome({ probes: res, expectations: buildExpectations(form.expect) });
-      onRan();
-      const answered = res.filter((p) => p.success === true).length;
-      toast(
-        `${res.length} probe${res.length === 1 ? "" : "s"} run — ${answered} got a response`,
-        answered === res.length ? "good" : "bad",
-      );
+      // The entry hop needs the same fence as the chain: the engine can hold
+      // this request for 25s, and the reader may navigate away mid-flight — an
+      // answer landing after the unmount would toast on an unrelated page and
+      // arm a timer the cleanup already detached.
+      if (retired(myRun)) return;
+      if (stillProbing(res)) {
+        setPending(STILL_PROBING);
+        toast("Probe round still running — results will appear below");
+        poll(myRun, baseline, startedAt, expected, expectations, deadline);
+      } else {
+        const probes = Array.isArray(res) ? res : [];
+        finish(probes, expectations);
+        onRan();
+      }
     } catch (err) {
+      if (retired(myRun)) return;
       setRunError(errMessage(err));
     } finally {
-      setRunning(false);
+      if (!retired(myRun)) setRunning(false);
     }
   };
 
@@ -465,6 +608,7 @@ function ProbeRunCard({
         {runError !== null && (
           <Notice onDismiss={() => setRunError(null)}>{runError}</Notice>
         )}
+        {pending !== null && <Notice kind="info">{pending}</Notice>}
       </div>
 
       {outcome !== null && (
@@ -1153,7 +1297,13 @@ function ScheduledProbeCard({
 // History
 // ---------------------------------------------------------------------------
 
-function ProbeHistoryCard({ ranAt }: { ranAt: number }) {
+function ProbeHistoryCard({
+  ranAt,
+  onNewestId,
+}: {
+  ranAt: number;
+  onNewestId: (id: string | undefined) => void;
+}) {
   const { goose } = useSdk();
   const [rows, setRows] = useState(200);
   const [route, setRoute] = useState("");
@@ -1169,9 +1319,19 @@ function ProbeHistoryCard({ ranAt }: { ranAt: number }) {
     ranAt,
   ]);
   const [limit, setLimit] = useState(PAGE);
-  useEffect(() => setLimit(PAGE), [route, reason, rows, ranAt]);
+  // Reset to the first page when the filter or fetch count changes — NOT on
+  // ranAt: a detached round bumps ranAt every poll tick, and resetting then
+  // would collapse a reader's "Load more" view every 3s. ExitChecksPage keys
+  // its reset on [filteredBy, total] for the same reason.
+  useEffect(() => setLimit(PAGE), [route, reason, rows]);
 
   const items = history.data ?? [];
+  // Feed the run card the newest row's id so a detached round can pick its own
+  // rows out of the history by identity (see probeRowsSince). Reported as the
+  // rows load; undefined until the first load lands, which probeRowsSince
+  // covers with its startedAt fallback.
+  const newest = items[0]?.id;
+  useEffect(() => onNewestId(newest), [newest, onNewestId]);
   const routeChoices = useMemo(
     () =>
       [...new Set(items.map((p) => p.route ?? "").filter((r) => r !== ""))].sort(),

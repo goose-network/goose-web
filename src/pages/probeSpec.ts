@@ -11,7 +11,7 @@
 
 import type { ChipSelection } from "../components/ChipPicker";
 import { ALL_SELECTED, nothingSelectedProblem } from "../components/ChipPicker";
-import type { ProbeRunRequest } from "../runApi";
+import type { HTTPProbe, ProbeRunRequest } from "../runApi";
 import { cleanList } from "../validate";
 
 /** Methods the form offers. Anything else the parser accepts verbatim. */
@@ -398,6 +398,113 @@ export function probeRoundProblem(
     };
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Detached rounds: pick this round's rows, know when it is done
+// ---------------------------------------------------------------------------
+//
+// A round over a whole fleet outlives the engine's 25s wait on the request: the
+// engine answers 202 and keeps running detached, recording each row as it
+// completes. The page then polls the history for those rows. These are the pure
+// parts of that poll — what pairs to expect, how long to wait, and which rows
+// belong to this round — kept here so they can be tested without a component.
+
+/** One (route, target) pair's identity, shared by the expected set and the
+ *  history rows. A NUL joins them so a route or target containing the other's
+ *  text cannot collide into one key. */
+const PAIR_SEP = String.fromCharCode(0);
+export function probePairKey(route: string, target: string): string {
+  return route + PAIR_SEP + target;
+}
+
+/** The (route, target) pairs a round will record, one per request: the engine
+ *  runs targets x routes and records a row per pair, so this set is what "the
+ *  round finished" means to a poller watching the history.
+ *
+ *  `routes` is the explicit list the spec carries, or — in all-mode, where the
+ *  spec omits it — the page's implied refs (one per configured outbound). That
+ *  implied list is an UPPER BOUND on what the engine actually builds, so an
+ *  all-mode round may finish with fewer pairs than this; the poller's deadline
+ *  is the fallback for that, not a hang. Both lists are deduped the way
+ *  buildProbeSpec and the engine's probeRoutes dedupe them, so a repeat does
+ *  not inflate the count. */
+export function expectedProbePairs(targets: string[], routes: string[]): Set<string> {
+  const out = new Set<string>();
+  for (const t of cleanList(targets)) {
+    for (const r of cleanList(routes)) {
+      out.add(probePairKey(r, t));
+    }
+  }
+  return out;
+}
+
+/** How long to keep polling for a detached round's rows, in milliseconds — a
+ *  client-side mirror of the engine's own round budget, so the poller waits as
+ *  long as the round can legitimately run and then stops.
+ *
+ *  The engine bounds a round by ceil(jobs / concurrency) x timeout + slack,
+ *  capped (internal/router/httpprobe.go: probeHTTPConcurrency=8,
+ *  probeRoundSlack=30s, maxProbeRunBudget=10m, maxProbeTimeout=5m). This mirrors
+ *  those constants and adds a margin for the last rows to land and be fetched.
+ *  `expected` is the pair count (an upper bound in all-mode); `timeoutSec` is
+ *  the per-request timeout the spec carries, or the engine default when it is
+ *  absent. The cap keeps a huge fleet from polling forever; the margin gives a
+ *  round that finishes right at its budget a tick to show its last rows. If
+ *  engine tuning changes these constants, this mirror must change with it. */
+export function probePollDeadlineMs(expected: number, timeoutSec: number): number {
+  const concurrency = 8;
+  const slackSec = 30;
+  const capSec = 600;
+  const marginSec = 30;
+  const t = timeoutSec > 0 ? Math.min(timeoutSec, 300) : ENGINE_PROBE_DEFAULTS.timeoutSec;
+  const waves = Math.ceil(Math.max(expected, 1) / concurrency);
+  const budgetSec = Math.min(waves * t + slackSec, capSec);
+  return (budgetSec + marginSec) * 1000;
+}
+
+/** Pick a detached round's rows out of the newest-first history: everything
+ *  newer than the row that was newest when the run started. Identity beats
+ *  timestamps here — the engine's clock is not the browser's, and a skewed host
+ *  would make a startedAt comparison find nothing or everything. The fallback
+ *  covers a run started before the history loaded, where there is no baseline;
+ *  it is the one path that trusts a clock, so it allows a little skew. A
+ *  baseline absent from the window means the round has written nothing yet (or
+ *  the window moved past it): keep looking. Twin of ExitChecksPage's rowsSince,
+ *  over probe rows. */
+export function probeRowsSince(
+  rows: HTTPProbe[],
+  baselineId: string | undefined,
+  startedAtMs: number,
+): HTTPProbe[] {
+  if (baselineId !== undefined) {
+    const at = rows.findIndex((p) => p.id === baselineId);
+    return at === -1 ? [] : rows.slice(0, at);
+  }
+  return rows.filter((p) => Date.parse(p.startedAt ?? "") >= startedAtMs - 5_000);
+}
+
+/** This round's progress from the rows picked out of the history: the records
+ *  to show (newest first, one per pair — a stacked or concurrent round can
+ *  record a pair twice, and the card wants the freshest verdict, not two rows
+ *  for one request) and whether every expected pair has landed. `complete` is
+ *  false when nothing was expected, so an empty estimate never reads as done;
+ *  the deadline is what ends such a poll. */
+export function probeRoundProgress(
+  mine: HTTPProbe[],
+  expected: Set<string>,
+): { rows: HTTPProbe[]; complete: boolean } {
+  const seen = new Set<string>();
+  const rows: HTTPProbe[] = [];
+  let covered = 0;
+  for (const p of mine) {
+    const key = probePairKey(p.route ?? "", p.target ?? "");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push(p);
+    if (expected.has(key)) covered++;
+  }
+  return { rows, complete: expected.size > 0 && covered >= expected.size };
 }
 
 const encoder = new TextEncoder();

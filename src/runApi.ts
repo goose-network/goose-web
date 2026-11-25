@@ -204,19 +204,59 @@ export interface ProbeEngineProbes extends NonNullable<Engine["probes"]> {
   http?: HTTPProbeConfig | undefined;
 }
 
-/** Runs one probe round now and returns its records, in targets-then-routes
- *  order. A target that fails to answer is a record with `success: false`,
- *  not an error — that is what a probe is for. */
+/** The 202 body of `POST /api/probes/run` when the round outlived the engine's
+ *  wait window: it is still running detached, and its rows appear in
+ *  `GET /api/probes/results` as they are recorded. A front proxy's 504 is
+ *  converted to this same shape — the response was lost, but the round is still
+ *  going, so polling is the right response. */
+export interface ProbeRunAccepted {
+  status?: string;
+  message?: string;
+}
+
+/** A probe run's answer: the records when the round finished within the
+ *  engine's wait window (a bare array, `null` when it had nothing in it), or
+ *  the accepted shape when it is still running and the caller must poll
+ *  `listProbeResults` for them. */
+export type ProbeRunResponse = HTTPProbe[] | ProbeRunAccepted | null;
+
+/** Runs one probe round now. A fast round answers with its records, in
+ *  targets-then-routes order; a target that fails to answer is a record with
+ *  `success: false`, not an error — that is what a probe is for. A round over a
+ *  whole fleet outlives the engine's 25s wait and answers `accepted` instead,
+ *  its rows landing in the history a moment later (see `stillProbing`). */
 export async function runProbes(
   goose: Goose,
   req: ProbeRunRequest,
-): Promise<HTTPProbe[]> {
-  // The engine answers with a JSON array; a round with nothing in it encodes
-  // as null, which is still "no results".
-  const res = await friendly(
-    goose.client.send<HTTPProbe[] | null>("POST", "/api/probes/run", req),
-  );
-  return res ?? [];
+): Promise<ProbeRunResponse> {
+  try {
+    // 200 is a JSON array (null when the round had nothing in it); 202 is the
+    // accepted object. Both are 2xx, so the transport decodes either.
+    return await goose.client.send<ProbeRunResponse>(
+      "POST",
+      "/api/probes/run",
+      req,
+    );
+  } catch (err) {
+    // A front proxy's read timeout (504) cuts the response, not the round: on
+    // the fixed engine the round runs detached and its rows still land, so
+    // treat it as accepted and poll. A 502 is NOT this — it means the engine
+    // refused or reset the connection (a crash or restart), a real failure to
+    // surface rather than mask behind a poll that would find nothing.
+    if (err instanceof GooseApiError && err.status === 504) {
+      return { status: "accepted" };
+    }
+    throw new Error(apiMessage(err));
+  }
+}
+
+/** True when the answer says the round is still running: the accepted object
+ *  (a 202, or a 504 converted to it). An array is the finished records and a
+ *  `null` body is a complete empty round — neither is "still probing". The
+ *  null check is load-bearing: `null` is not an array, so a bare
+ *  `!Array.isArray` would misread a 200 null as a round in flight. */
+export function stillProbing(res: ProbeRunResponse): boolean {
+  return res !== null && !Array.isArray(res);
 }
 
 /** Recorded probes, newest first (`GET /api/probes/results`). */

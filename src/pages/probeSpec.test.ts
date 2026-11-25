@@ -13,6 +13,7 @@ import {
   compile,
   EMPTY_EXPECT,
   ENGINE_PROBE_DEFAULTS,
+  expectedProbePairs,
   failureLabel,
   formatStatuses,
   hasExpectations,
@@ -22,13 +23,18 @@ import {
   parseRawRequest,
   parseStatuses,
   phaseLeg,
+  probePairKey,
+  probePollDeadlineMs,
   probeResponse,
   probeRoundProblem,
+  probeRoundProgress,
+  probeRowsSince,
   PROBE_CAPS,
   PROBE_TARGET_PRESETS,
   selectionFromStored,
   type ProbeSpecFields,
 } from "./probeSpec";
+import type { HTTPProbe } from "../runApi";
 
 /** Unwrap a parse result, failing the test with the parser's own message. */
 function parsed(raw: string) {
@@ -790,5 +796,132 @@ describe("failureLabel on a half-classified leg", () => {
 
   it("still says request failed when neither side arrived", () => {
     expect(failureLabel(undefined, undefined)).toBe("request failed");
+  });
+});
+
+describe("probePairKey", () => {
+  it("is stable for one pair and distinct for another", () => {
+    expect(probePairKey("outbound:x", "https://a")).toBe(
+      probePairKey("outbound:x", "https://a"),
+    );
+    expect(probePairKey("outbound:x", "https://a")).not.toBe(
+      probePairKey("outbound:y", "https://a"),
+    );
+  });
+
+  it("separates the two halves so a shifted boundary cannot collide", () => {
+    // Without a separator ("ab","c") and ("a","bc") would join to one string.
+    expect(probePairKey("ab", "c")).not.toBe(probePairKey("a", "bc"));
+  });
+});
+
+describe("expectedProbePairs", () => {
+  it("is the deduped cross product of targets and routes", () => {
+    const pairs = expectedProbePairs(
+      ["https://a", "https://a", "https://b"],
+      ["outbound:x", "outbound:x", "direct"],
+    );
+    // 2 distinct targets x 2 distinct routes, repeats dropped both sides.
+    expect(pairs.size).toBe(4);
+    expect(pairs.has(probePairKey("outbound:x", "https://a"))).toBe(true);
+    expect(pairs.has(probePairKey("direct", "https://b"))).toBe(true);
+    expect(pairs.has(probePairKey("outbound:x", "https://c"))).toBe(false);
+  });
+
+  it("is empty when either side is empty", () => {
+    expect(expectedProbePairs([], ["direct"]).size).toBe(0);
+    expect(expectedProbePairs(["https://a"], []).size).toBe(0);
+  });
+});
+
+describe("probePollDeadlineMs", () => {
+  it("mirrors the engine budget for the live 26-route round", () => {
+    // ceil(26/8)=4 waves x 15s + 30s slack = 90s, + 30s margin = 120s.
+    expect(probePollDeadlineMs(26, 15)).toBe(120_000);
+  });
+
+  it("uses the engine default timeout when the spec omits it", () => {
+    // 1 wave x 15s + 30s + 30s margin = 75s.
+    expect(probePollDeadlineMs(1, 0)).toBe(75_000);
+  });
+
+  it("honours an explicit per-request timeout", () => {
+    // 8 pairs = 1 wave x 10s + 30s + 30s = 70s.
+    expect(probePollDeadlineMs(8, 10)).toBe(70_000);
+  });
+
+  it("caps the per-request timeout at the engine's 5m ceiling", () => {
+    // 1 wave x 300s (not 1000) + 30s + 30s = 360s.
+    expect(probePollDeadlineMs(8, 1000)).toBe(360_000);
+  });
+
+  it("caps the whole budget at the engine's 10m ceiling plus margin", () => {
+    // A huge fleet would compute far past 600s; the cap holds it to 600 + 30.
+    expect(probePollDeadlineMs(100_000, 300)).toBe(630_000);
+  });
+});
+
+describe("probeRowsSince", () => {
+  const row = (id: string, startedAt: string): HTTPProbe => ({ id, startedAt });
+
+  it("takes everything newer than the baseline row, by identity", () => {
+    const rows = [row("id3", ""), row("id2", ""), row("id1", "")];
+    expect(probeRowsSince(rows, "id2", 0).map((p) => p.id)).toEqual(["id3"]);
+  });
+
+  it("returns nothing when the baseline is not in the window", () => {
+    const rows = [row("id3", ""), row("id2", "")];
+    expect(probeRowsSince(rows, "gone", 0)).toEqual([]);
+  });
+
+  it("falls back to startedAt (with skew) when there is no baseline", () => {
+    const start = Date.parse("2026-11-25T00:00:10Z");
+    const rows = [
+      row("new", "2026-11-25T00:00:12Z"),
+      row("old", "2026-11-25T00:00:00Z"),
+    ];
+    // start - 5s = 00:00:05; the 00:00:12 row qualifies, the 00:00:00 one not.
+    expect(probeRowsSince(rows, undefined, start).map((p) => p.id)).toEqual(["new"]);
+  });
+});
+
+describe("probeRoundProgress", () => {
+  const probe = (route: string, target: string, id: string): HTTPProbe => ({
+    id,
+    route,
+    target,
+  });
+
+  it("is complete when every expected pair has landed", () => {
+    const expected = expectedProbePairs(["https://a"], ["outbound:x", "direct"]);
+    const mine = [probe("outbound:x", "https://a", "1"), probe("direct", "https://a", "2")];
+    const p = probeRoundProgress(mine, expected);
+    expect(p.complete).toBe(true);
+    expect(p.rows).toHaveLength(2);
+  });
+
+  it("is not complete while a pair is still missing", () => {
+    const expected = expectedProbePairs(["https://a"], ["outbound:x", "direct"]);
+    const mine = [probe("outbound:x", "https://a", "1")];
+    const p = probeRoundProgress(mine, expected);
+    expect(p.complete).toBe(false);
+    expect(p.rows).toHaveLength(1);
+  });
+
+  it("keeps the newest row per pair when a pair was recorded twice", () => {
+    const expected = expectedProbePairs(["https://a"], ["outbound:x"]);
+    // Newest first: the second occurrence of the pair is the older verdict.
+    const mine = [
+      probe("outbound:x", "https://a", "new"),
+      probe("outbound:x", "https://a", "old"),
+    ];
+    const p = probeRoundProgress(mine, expected);
+    expect(p.rows.map((r) => r.id)).toEqual(["new"]);
+    expect(p.complete).toBe(true);
+  });
+
+  it("never reads as complete when nothing was expected", () => {
+    const p = probeRoundProgress([probe("direct", "https://a", "1")], new Set());
+    expect(p.complete).toBe(false);
   });
 });
