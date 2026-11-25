@@ -1,15 +1,20 @@
 // src/components/ChipPicker.test.ts — the rules behind the bounded
 // outbound/route picker: what shows through a filter, what reads as checked,
-// what one click on a chip commits, and how a selection reads back in words.
+// what one click on a chip commits, what the batch controls commit for a
+// whole filtered view, and how a selection reads back in words.
 
 import { describe, expect, it } from "vitest";
 import {
   ALL_SELECTED,
+  canClearFiltered,
+  canSelectFiltered,
   chipChecked,
+  clearFiltered,
   covers,
   isNothingSelected,
   NONE_SELECTED,
   nothingSelectedProblem,
+  selectFiltered,
   selectionWord,
   toggleAll,
   toggleChip,
@@ -235,6 +240,175 @@ describe("toggleAll", () => {
     expect(isNothingSelected(ALL_SELECTED)).toBe(false);
     expect(isNothingSelected(explicit("chain:relay"))).toBe(false);
     expect(isNothingSelected(NONE_SELECTED)).toBe(true);
+  });
+});
+
+describe("selectFiltered", () => {
+  it("checks every choice the filter matches, in one click", () => {
+    expect(selectFiltered(NONE_SELECTED, POOL, CHOICES, "psiphon")).toEqual(
+      explicit("outbound:psiphon-1.2.3.4", "outbound:psiphon-5.6.7.8"),
+    );
+  });
+
+  it("names a matched pool's members, not the pool ref", () => {
+    // The same claim a single pool click makes: a round through "pool:x"
+    // probes only the member its selector picks, so the batch click commits
+    // the members too.
+    expect(selectFiltered(NONE_SELECTED, POOL, CHOICES, "pool")).toEqual(
+      explicit("outbound:psiphon-1.2.3.4", "outbound:psiphon-5.6.7.8"),
+    );
+  });
+
+  it("adds to an explicit selection, deduped, keeping the order", () => {
+    // The refs already there keep their places; the new ones arrive in list
+    // order. The pool chip and the outbound chips name the same members, and
+    // a repeat would hand the round the same route twice.
+    expect(
+      selectFiltered(
+        explicit("chain:relay", "outbound:psiphon-1.2.3.4"),
+        POOL,
+        CHOICES,
+        "psiphon",
+      ),
+    ).toEqual(
+      explicit(
+        "chain:relay",
+        "outbound:psiphon-1.2.3.4",
+        "outbound:psiphon-5.6.7.8",
+      ),
+    );
+  });
+
+  it("turns the all-chip off: a batch click is still a click on chips", () => {
+    expect(selectFiltered(ALL_SELECTED, POOL, CHOICES, "chain")).toEqual(
+      explicit("chain:relay"),
+    );
+  });
+
+  it("materializes the whole explicit list with no filter", () => {
+    // What the reader asked for: every listed choice by name. The pool chip
+    // covers the same two outbounds the chips name, so the pool ref itself
+    // drops out — exactly as clicking each chip in turn would leave it.
+    expect(selectFiltered(ALL_SELECTED, POOL, CHOICES, "")).toEqual(
+      explicit(
+        "outbound:psiphon-1.2.3.4",
+        "outbound:psiphon-5.6.7.8",
+        "chain:relay",
+      ),
+    );
+  });
+
+  it("names an empty pool's own ref, as a single click would", () => {
+    const groups: ChipGroup[] = [{ ref: "pool:empty", members: [] }];
+    expect(selectFiltered(NONE_SELECTED, groups, ["pool:empty"], "")).toEqual(
+      explicit("pool:empty"),
+    );
+  });
+
+  it("does not name the rest of the fleet when the filter matches one chip", () => {
+    // The batch control must not become a back door to the fleet-wide
+    // materialization the all-chip exists to avoid: a narrow filter commits
+    // only what it matches.
+    const fleet = Array.from({ length: 476 }, (_, i) => `outbound:o${i}`);
+    const group: ChipGroup[] = [{ ref: "pool:fleet", members: fleet }];
+    expect(
+      selectFiltered(ALL_SELECTED, group, [...fleet, "pool:fleet"], ":o0"),
+    ).toEqual(explicit("outbound:o0"));
+  });
+
+  it("leaves the selection untouched when the filter matches nothing", () => {
+    // A "select" click must not uncheck the all-chip into nothing, nor
+    // disturb an explicit list it cannot add to.
+    expect(selectFiltered(ALL_SELECTED, POOL, CHOICES, "nope")).toEqual(
+      ALL_SELECTED,
+    );
+    expect(
+      selectFiltered(explicit("chain:relay"), POOL, CHOICES, "nope"),
+    ).toEqual(explicit("chain:relay"));
+  });
+
+  it("reads a whitespace-only filter as no filter", () => {
+    // matches() trims, so the batch select materializes the whole list.
+    expect(selectFiltered(NONE_SELECTED, POOL, CHOICES, "   ")).toEqual(
+      selectFiltered(NONE_SELECTED, POOL, CHOICES, ""),
+    );
+  });
+});
+
+describe("clearFiltered", () => {
+  const allThree = explicit(
+    "chain:relay",
+    "outbound:psiphon-1.2.3.4",
+    "outbound:psiphon-5.6.7.8",
+  );
+
+  it("removes exactly the filtered covers, keeping the rest", () => {
+    expect(clearFiltered(allThree, POOL, CHOICES, "psiphon")).toEqual(
+      explicit("chain:relay"),
+    );
+  });
+
+  it("clearing a matched pool removes its members", () => {
+    expect(clearFiltered(allThree, POOL, CHOICES, "pool")).toEqual(
+      explicit("chain:relay"),
+    );
+  });
+
+  it("never flips into all-mode when the last ref goes", () => {
+    // An empty list on the wire means "every one of them" — the opposite of
+    // what a clear asks for — so the caller has to refuse this state.
+    const next = clearFiltered(explicit("chain:relay"), POOL, CHOICES, "chain");
+    expect(next).toEqual(NONE_SELECTED);
+    expect(isNothingSelected(next)).toBe(true);
+  });
+
+  it("with no filter clears the whole selection, all-mode included", () => {
+    // "Clear selection" means exactly that: the same state unchecking the
+    // all-chip reaches, not a silent return to it.
+    expect(clearFiltered(allThree, POOL, CHOICES, "")).toEqual(NONE_SELECTED);
+    expect(clearFiltered(ALL_SELECTED, POOL, CHOICES, "")).toEqual(
+      NONE_SELECTED,
+    );
+    expect(clearFiltered(allThree, POOL, CHOICES, "   ")).toEqual(
+      NONE_SELECTED,
+    );
+  });
+
+  it("leaves all-mode untouched when a filter is active", () => {
+    // Nothing is named to subtract from, and dropping the engine's
+    // enumeration wholesale is not what "clear filtered" promises. The
+    // picker disables the control here (canClearFiltered).
+    expect(clearFiltered(ALL_SELECTED, POOL, CHOICES, "psiphon")).toEqual(
+      ALL_SELECTED,
+    );
+  });
+
+  it("keeps a selected ref the current choices no longer list", () => {
+    // A stored probe can name an outbound since deleted. "Clear filtered"
+    // subtracts what the filter matches — not everything it doesn't.
+    expect(
+      clearFiltered(explicit("outbound:gone", "chain:relay"), POOL, CHOICES, "chain"),
+    ).toEqual(explicit("outbound:gone"));
+  });
+});
+
+describe("canSelectFiltered / canClearFiltered", () => {
+  it("select needs a choice the filter matches", () => {
+    expect(canSelectFiltered(CHOICES, "psiphon")).toBe(true);
+    expect(canSelectFiltered(CHOICES, "")).toBe(true);
+    expect(canSelectFiltered(CHOICES, "nope")).toBe(false);
+    expect(canSelectFiltered([], "")).toBe(false);
+  });
+
+  it("clear needs something named, or a whole selection to drop", () => {
+    // "Clear selection" (no filter) works from all-mode too; "clear filtered"
+    // needs an explicit list, and nothing-selected has nothing to clear.
+    expect(canClearFiltered(ALL_SELECTED, "")).toBe(true);
+    expect(canClearFiltered(ALL_SELECTED, "psiphon")).toBe(false);
+    expect(canClearFiltered(explicit("chain:relay"), "psiphon")).toBe(true);
+    expect(canClearFiltered(explicit("chain:relay"), "")).toBe(true);
+    expect(canClearFiltered(NONE_SELECTED, "")).toBe(false);
+    expect(canClearFiltered(NONE_SELECTED, "psiphon")).toBe(false);
   });
 });
 

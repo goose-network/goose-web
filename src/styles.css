@@ -1138,6 +1138,29 @@ button.chip {
   color: var(--text-secondary);
 }
 
+/* The picker's batch controls ride beside the filter box — or alone above a
+   short list — and stay chip-sized so they do not dwarf the form. The filter
+   box grows to fill the row; the buttons keep their labels on one line, and
+   the row wraps rather than overflowing a narrow card. */
+.chip-batch {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.chip-batch .search-wrap {
+  flex: 1;
+}
+
+.chip-batch button {
+  padding: 2px 10px;
+  min-height: 26px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 /* --- filterable single-select (chain layers, provider upstream route) --- */
 
 /* The trigger is the input plus its verdict pill in a row; the open panel hangs

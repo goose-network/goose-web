@@ -378,7 +378,7 @@ function ProviderForm({
           onChange={(upstream_proxy) =>
             set({ upstream_proxy: upstream_proxy.trim() })
           }
-          hint="Routes this provider's own URL fetches through an engine route instead of the engine host's network — for subscription URLs the host cannot reach directly. Pick a route below, or type one: outbound:<id>, pool:<id>, a bare pool/outbound id, or “access” (dial direct first, then the access pool). Blank = direct."
+          hint="Routes this provider's own proxy-list fetches (a subscription URL, server list or directory) through an engine route instead of the engine host's network — for lists the host cannot reach directly. The outbounds' own tunnel and relay dials never ride it. Pick a route below, or type one: outbound:<id>, pool:<id>, a bare pool/outbound id, or “access” (dial direct first, then the access pool). Blank = direct."
         />
       </div>
       <PluginHelp plugin={plugin} />
@@ -425,7 +425,7 @@ const EXAMPLES: Record<string, PluginHelpInfo> = {
     paragraphs: [
       "Runs with zero configuration: leave every field empty and the provider connects to the production Psiphon network, auto-downloads the signed server list, and feeds one outbound per real Psiphon server — IP, region, protocols — so the Outbounds page shows the actual server list and each server can be pooled, pinned, or filtered individually. The general tunnel, where Psiphon itself picks the exit server per connection, keeps running underneath but is deliberately not listed as an outbound: no single address says where its traffic would exit.",
       "Dials run in memory through the engine's network stack: no local SOCKS or HTTP proxy is involved, and the tunnels' own connections to their Psiphon servers go through the engine's configured stack. Per-server outbounds appear as soon as the server list lands (typically seconds to a minute after the tunnel establishes); a hand-written “psiphon” outbound with no server pinned still dials through the general tunnel.",
-      "Only set fields to customize: config_path points at a real psiphon.config (for a custom Psiphon network), server_list_path seeds the datastore from a server_list.dat, upstream_proxy routes tunnel-core through another proxy (e.g. socks5://127.0.0.1:7890) when direct 443 is blocked, establish_timeout_seconds (default 120) bounds how long a dial waits for a tunnel, and data_dir relocates the server-list datastore.",
+      "Only set fields to customize: config_path points at a real psiphon.config (for a custom Psiphon network), server_list_path seeds the datastore from a server_list.dat, upstream_proxy routes only the server-list fetch through another proxy (e.g. socks5://127.0.0.1:7890) when direct access is blocked (the tunnels' own dials never ride it — they go through the engine's stack), establish_timeout_seconds (default 120) bounds how long a dial waits for a tunnel, and data_dir relocates the server-list datastore.",
     ],
     example: {
       label: "Example: out-of-the-box (empty config)",
@@ -450,8 +450,8 @@ const EXAMPLES: Record<string, PluginHelpInfo> = {
     urlPlaceholder: "(no config needed — leave blank)",
     title: "tor — Tor anonymity network",
     paragraphs: [
-      "Runs with zero configuration: leave every field empty and the provider bootstraps a Tor circuit from the embedded directory authorities and advertises the exit roster — one outbound per exit relay (named <id>-<nickname>-<digest>) — so the Outbounds page shows the real exits. The general “tor” outbound rides a live circuit and appears once the guard link is up; no subscription URL is involved.",
-      "Only set fields to customize: outbound_id (default “tor”) names the general outbound and prefixes the per-exit IDs; upstream_proxy routes the directory fetch and guard link through another proxy when direct access is blocked; verify_signatures (default on) checks the consensus; path_len, allow_private_addresses and the timeout knobs tune circuit building.",
+      "Runs with zero configuration: leave every field empty and the provider bootstraps a Tor circuit from the embedded directory authorities and advertises the exit roster — one outbound per exit relay (named <id>-<nickname>-<digest>-<ip:port>) — so the Outbounds page shows the real exits. The general “tor” outbound rides a live circuit and appears once the guard link is up; no subscription URL is involved.",
+      "Only set fields to customize: outbound_id (default “tor”) names the general outbound and prefixes the per-exit IDs; upstream_proxy routes only the directory fetch through another proxy when direct access is blocked — circuit and exit dials ride the engine's stack, never the upstream; verify_signatures (default on) checks the consensus; path_len, allow_private_addresses and the timeout knobs tune circuit building.",
     ],
     example: {
       label: "Example: out-of-the-box (empty config)",

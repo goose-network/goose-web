@@ -27,6 +27,15 @@
 // A live fleet has hundreds of outbounds, so the individual chips sit in a
 // bounded scroll box with a filter above a threshold: an unbounded grid of 300
 // chips would dwarf the card around it.
+//
+// Beside the filter box sit two batch controls: one click checks every choice
+// the filter matches — "select all filtered" — and one click unchecks exactly
+// those — "clear filtered". Both work on the explicit list, so a batch click
+// turns the all-chip off just like a single chip click does. With no filter
+// they read "select all" / "clear selection": naming the whole list the box
+// shows, or reaching the nothing-selected state the caller refuses. The
+// dynamic all-chip remains the way to say "every one of them" without naming
+// a single ref.
 
 import { useRef, useState } from "react";
 import { matches, SearchInput } from "./SearchInput";
@@ -146,6 +155,77 @@ export function toggleAll(sel: ChipSelection): ChipSelection {
   return sel.all ? NONE_SELECTED : ALL_SELECTED;
 }
 
+/** The next selection when "select all filtered" is clicked: the refs every
+ *  matching choice covers join the explicit list, deduped — a pool chip and
+ *  its member chips name the same outbounds — with the refs already there
+ *  keeping their places and the new ones arriving in list order. Like any
+ *  chip click this turns the all-chip off: a batch click is still a click on
+ *  chips, and "every one of them plus these" is not a thing either wire
+ *  format can say. With no filter it materializes the whole list the box
+ *  shows — the reader asked for these refs by name, and the dynamic all-chip
+ *  stays one click away. A filter that matches nothing leaves the selection
+ *  untouched: a "select" click must not uncheck the all-chip into nothing. */
+export function selectFiltered(
+  sel: ChipSelection,
+  groups: ChipGroup[],
+  choices: string[],
+  filter: string,
+): ChipSelection {
+  const add = choices
+    .filter((c) => matches(c, filter))
+    .flatMap((c) => covers(groups, c));
+  if (add.length === 0) return sel;
+  const base = sel.all ? [] : sel.refs;
+  const refs = [...base];
+  for (const c of add) {
+    if (!refs.includes(c)) refs.push(c);
+  }
+  return { all: false, refs };
+}
+
+/** The next selection when "clear filtered" is clicked: the refs every
+ *  matching choice covers leave the explicit list, and the rest keep their
+ *  places. Clearing never returns to all-mode — an empty list on the wire
+ *  means "every one of them", the opposite of what a clear asks for — so
+ *  removing the last ref reaches NONE_SELECTED, which the caller refuses to
+ *  run. With no filter the control reads "clear selection" and means exactly
+ *  that, from all-mode too: the same state unchecking the all-chip reaches.
+ *  Under the all-chip with a filter active there is no named list to
+ *  subtract from, and dropping the engine's enumeration wholesale is not
+ *  what "clear filtered" promises — the selection stays as it is, and the
+ *  picker disables the control there (see canClearFiltered). */
+export function clearFiltered(
+  sel: ChipSelection,
+  groups: ChipGroup[],
+  choices: string[],
+  filter: string,
+): ChipSelection {
+  if (filter.trim() === "") return NONE_SELECTED;
+  if (sel.all) return sel;
+  const remove = choices
+    .filter((c) => matches(c, filter))
+    .flatMap((c) => covers(groups, c));
+  return { all: false, refs: sel.refs.filter((r) => !remove.includes(r)) };
+}
+
+/** Whether "select all filtered" has anything to add: a filter no choice
+ *  matches would make the click a no-op on an explicit list, or turn the
+ *  all-chip off into nothing — so the control disables rather than promising
+ *  a selection it cannot make. */
+export function canSelectFiltered(choices: string[], filter: string): boolean {
+  return choices.some((c) => matches(c, filter));
+}
+
+/** Whether "clear filtered" has anything to remove. "Clear selection" (no
+ *  filter) works from any state that selects something — all-mode included,
+ *  where it means the same as unchecking the all-chip. "Clear filtered" needs
+ *  a named list: under the all-chip no chip reads checked and there is nothing
+ *  to subtract from. Nothing-selected has nothing to clear either. */
+export function canClearFiltered(sel: ChipSelection, filter: string): boolean {
+  if (isNothingSelected(sel)) return false;
+  return filter.trim() === "" || !sel.all;
+}
+
 /** The chips the box shows: everything matching the filter, plus whatever is
  *  selected whether it matches or not — a selection the filter pushed out of
  *  sight reads as a selection lost. The pinning stops at a large selection,
@@ -181,6 +261,9 @@ export function ChipPicker({
   const [filter, setFilter] = useState("");
   const filterRef = useRef<HTMLInputElement>(null);
   const shown = visibleChoices(choices, value.refs, filter);
+  // matches() trims, so a whitespace-only filter narrows nothing and the
+  // batch controls read as their no-filter selves.
+  const narrowed = filter.trim() !== "";
   const toggle = (ref: string) => {
     const next = toggleChip(value, groups, ref);
     onChange(next);
@@ -207,14 +290,48 @@ export function ChipPicker({
           {allLabel}
         </label>
       </div>
-      {choices.length > FILTER_AT && (
-        <SearchInput
-          id={`${id}-filter`}
-          value={filter}
-          onChange={setFilter}
-          inputRef={filterRef}
-        />
-      )}
+      {/* Batch controls beside the filter box: one click checks or clears
+          exactly what the filter matches, covers included. A short list has
+          no filter box, but the controls still offer "select all" / "clear
+          selection" over the whole list. */}
+      <div className="chip-batch">
+        {choices.length > FILTER_AT && (
+          <SearchInput
+            id={`${id}-filter`}
+            value={filter}
+            onChange={setFilter}
+            inputRef={filterRef}
+          />
+        )}
+        <button
+          type="button"
+          className="ghost"
+          disabled={!canSelectFiltered(choices, filter)}
+          title={
+            narrowed
+              ? "Check every choice the filter matches, and what each covers — adds to the selection."
+              : "Check every listed choice explicitly. Unlike the all-chip this names the refs, so the list stays fixed as the fleet changes."
+          }
+          onClick={() => onChange(selectFiltered(value, groups, choices, filter))}
+        >
+          {narrowed ? "Select all filtered" : "Select all"}
+        </button>
+        <button
+          type="button"
+          className="ghost"
+          disabled={!canClearFiltered(value, filter)}
+          title={
+            narrowed
+              ? value.all
+                ? "Nothing is named to clear — uncheck the all-chip to stop selecting every one of them."
+                : "Uncheck every choice the filter matches, and what each covers — the rest stay selected."
+              : "Uncheck everything, reaching the nothing-selected state the run button refuses."
+          }
+          onClick={() => onChange(clearFiltered(value, groups, choices, filter))}
+        >
+          {narrowed ? "Clear filtered" : "Clear selection"}
+        </button>
+      </div>
       <div className="chip-grid chip-scroll">
         {shown.map((ref) => {
           const checked = chipChecked(value, groups, ref);

@@ -510,7 +510,9 @@ function TargetPresets({
  *  notice below then reports rather than the engine silently re-reading an
  *  empty list as "every outbound". A pool chip selects its member outbounds,
  *  so one click probes the whole pool instead of whichever member its selector
- *  happens to pick. `problem` is reported here, next to the control that
+ *  happens to pick. The batch controls beside the filter check or clear every
+ *  route the filter matches in one click (ChipPicker's selectFiltered /
+ *  clearFiltered). `problem` is reported here, next to the control that
  *  caused it, rather than only on the button. */
 function RoutePicker({
   routes,
@@ -527,7 +529,7 @@ function RoutePicker({
     <FieldGroup
       id="probe-routes"
       label="Routes"
-      hint={`“Every outbound” probes each built outbound, and stays live as the fleet changes. Unchecking it selects nothing — click the routes this round should use. A pool chip selects all of that pool's outbounds, because a round through “pool:…” itself probes only the one member its selector picks. A chain is probed through its own selection path — the same one dispatch uses. The engine caps a round at ${PROBE_CAPS.maxFanout} requests (targets × routes) and ${PROBE_CAPS.maxRoutes} routes, so a fleet-wide selection needs a single target.`}
+      hint={`“Every outbound” probes each built outbound, and stays live as the fleet changes. Unchecking it selects nothing — click the routes this round should use, or use the batch controls beside the filter to check or clear every route the filter matches in one click. A pool chip selects all of that pool's outbounds, because a round through “pool:…” itself probes only the one member its selector picks. A chain is probed through its own selection path — the same one dispatch uses. The engine caps a round at ${PROBE_CAPS.maxFanout} requests (targets × routes) and ${PROBE_CAPS.maxRoutes} routes, so a fleet-wide selection needs a single target.`}
     >
       <ChipPicker
         id="probe-routes"
