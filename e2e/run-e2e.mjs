@@ -536,39 +536,41 @@ await test("chain layers are picked from the engine's pools and outbounds", asyn
   await page.click("button:has-text('New chain')");
   await page.locator("#chain-id").fill(id);
 
-  // A layer is a picker, not a text input: the point is that the reader cannot
-  // type an id the engine has nothing behind.
+  // A layer is a picker, not a free-text field: the point is that the reader
+  // cannot commit an id the engine has nothing behind. The row is a
+  // FilterSelect combobox — typing filters the engine's own choices, and a
+  // query that names nothing offers nothing to commit.
   await page.click("button:has-text('Add layer')");
   const layer = page.locator("#chain-layers");
-  await layer.waitFor({ timeout: 5_000 });
+  // The catalog may still be in flight when the row first renders (text-input
+  // mode); wait for the picker it becomes once the choices arrive.
+  await page.locator("#chain-layers[role=combobox]").waitFor({ timeout: 5_000 });
   assert.equal(
-    await page.locator(".arr-editor:has(#chain-layers) select").count(),
+    await page.locator(".arr-editor:has(#chain-layers) .filter-select").count(),
     1,
-    "the layer row is not a select",
-  );
-  assert.equal(
-    await page.locator(".arr-editor:has(#chain-layers) input[type=text]").count(),
-    0,
-    "the layer row still offers a text input",
+    "the layer row is not a filterable picker",
   );
 
   // The choices are the engine's own, grouped, so the reader can tell a pool
-  // from an outbound — the value is a bare id either way.
-  const optionValues = await layer.locator("option").evaluateAll((opts) =>
-    opts.map((o) => o.value),
-  );
-  const groupLabels = await layer.locator("optgroup").evaluateAll((gs) =>
-    gs.map((g) => g.getAttribute("label")),
-  );
+  // from an outbound — the value is a bare id either way (the option labels
+  // are the ids themselves).
+  await layer.click();
+  await page.locator("#chain-layers-listbox").waitFor({ timeout: 5_000 });
+  const optionLabels = await page
+    .locator("#chain-layers-listbox .fs-option-label")
+    .evaluateAll((els) => els.map((e) => e.textContent));
+  const groupLabels = await page
+    .locator(".fs-panel .fs-group")
+    .evaluateAll((gs) => gs.map((g) => g.textContent));
   for (const pid of poolIds) {
-    assert.ok(optionValues.includes(pid), `pool ${pid} is not a layer choice`);
+    assert.ok(optionLabels.includes(pid), `pool ${pid} is not a layer choice`);
   }
   // An outbound whose id is also a pool's is shadowed by that pool — the engine
   // resolves it to the pool, so offering both would offer a choice that does
   // not exist.
   const poolSet = new Set(poolIds);
   for (const oid of outboundIds.filter((o) => !poolSet.has(o))) {
-    assert.ok(optionValues.includes(oid), `outbound ${oid} is not a layer choice`);
+    assert.ok(optionLabels.includes(oid), `outbound ${oid} is not a layer choice`);
   }
   assert.ok(groupLabels.includes("Pools") || poolIds.length === 0, "no Pools group");
   assert.ok(
@@ -576,6 +578,15 @@ await test("chain layers are picked from the engine's pools and outbounds", asyn
       outboundIds.filter((o) => !poolSet.has(o)).length === 0,
     "no Outbounds group",
   );
+
+  // The free-text guard the select enforced by construction: typing an id the
+  // engine has nothing behind narrows to "No matches.", and Enter commits
+  // nothing (allowCustom is off for layers). Esc then restores the unchosen
+  // trigger — proof the draft never took the typed text.
+  await layer.fill("e2e-no-such-route-xyz");
+  await page.waitForSelector(".fs-panel .fs-none", { timeout: 5_000 });
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Escape");
 
   // The negative path, taken while the row "Add layer" just pushed is still
   // unchosen (its value is ""): the save has to be blocked HERE, not accepted
@@ -590,7 +601,7 @@ await test("chain layers are picked from the engine's pools and outbounds", asyn
   // useResource.save returns before it ever calls the API.
   assert.equal(
     await layer.inputValue(),
-    "",
+    "(choose a pool or outbound)",
     "premise: the row 'Add layer' pushed should still be unchosen",
   );
   // Scoped by the ID field, not the layers editor: the editor's only row (and
@@ -652,8 +663,12 @@ await test("chain layers are picked from the engine's pools and outbounds", asyn
   await page.waitForSelector("#chain-layers", { timeout: 5_000 });
 
   // Pick the pool when there is one, else the first outbound, and save it.
+  // The option's label is the bare id; click its row in the open box.
   const picked = poolIds[0] ?? outboundIds[0];
-  await layer.selectOption(picked);
+  await layer.click();
+  await page
+    .locator(`#chain-layers-listbox .fs-option:has(.fs-option-label:text-is("${picked}"))`)
+    .click();
   await page.click("form button:has-text('Save')");
   await page.waitForSelector(`tr:has-text('${id}')`, { timeout: 5_000 });
   const after = await api("chains");
@@ -661,9 +676,9 @@ await test("chain layers are picked from the engine's pools and outbounds", asyn
   assert.ok(saved, "created chain missing from engine");
   assert.deepEqual(saved.layers, [picked], `chain saved layers ${saved.layers}`);
 
-  // Editing it back keeps the stored layer selected — a select whose value
-  // matches no option renders blank, and saving that would silently shorten
-  // the chain.
+  // Editing it back keeps the stored layer chosen — the closed trigger shows
+  // the stored id (its option's label); a picker that lost it would render the
+  // placeholder, and saving that would silently shorten the chain.
   await page
     .locator(`table.data tbody tr:not(.editor-row):has-text('${id}') button:has-text('Edit')`)
     .click();
