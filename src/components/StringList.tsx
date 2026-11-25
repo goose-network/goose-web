@@ -10,6 +10,8 @@
 // ids of other configured things (chain layers pick from the engine's pools
 // and outbounds) rather than text the reader invents.
 
+import { FilterSelect, type RouteMetric } from "./FilterSelect";
+
 /** One <optgroup>: a titled run of choices. */
 export interface OptionGroup {
   label: string;
@@ -36,6 +38,13 @@ export interface StringListProps {
    *  ChainsPage.layerOptions). In select mode `placeholder` labels the
    *  leading empty option that a freshly added row starts on. */
   options?: ReadonlyArray<OptionGroup> | undefined;
+  /** render each row as a filterable picker (type to narrow, filter by probe
+   *  result) instead of a plain <select>. Only meaningful with `options`; a
+   *  long fleet of choices is what earns it. */
+  filterable?: boolean | undefined;
+  /** latest probe verdict per choice value, for the filterable rows' metric
+   *  pills and filters. Absent leaves the picker a plain keyword filter. */
+  metrics?: ReadonlyMap<string, RouteMetric> | undefined;
 }
 
 export function StringList({
@@ -49,6 +58,8 @@ export function StringList({
   hint,
   addLabel = "Add",
   options,
+  filterable = false,
+  metrics,
 }: StringListProps) {
   const move = (i: number, dir: -1 | 1) => {
     const j = i + dir;
@@ -87,6 +98,17 @@ export function StringList({
                 placeholder={placeholder}
                 aria-label={`${label}, entry ${i + 1}`}
                 onChange={(e) => edit(i, e.target.value)}
+              />
+            ) : filterable ? (
+              <FilterSelect
+                id={i === 0 ? id : `${id}-${i}`}
+                value={v}
+                onChange={(nv) => edit(i, nv)}
+                groups={options}
+                placeholder={placeholder ?? "(choose…)"}
+                metrics={metrics}
+                mono={mono}
+                ariaLabel={`${label}, entry ${i + 1}`}
               />
             ) : (
               <select

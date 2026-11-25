@@ -1138,6 +1138,119 @@ button.chip {
   color: var(--text-secondary);
 }
 
+/* --- filterable single-select (chain layers, provider upstream route) --- */
+
+/* The trigger is the input plus its verdict pill in a row; the open panel hangs
+   below, absolutely positioned so it overlays the form rather than reflowing it.
+   min-width:0 lets a long id ellipsize instead of pushing the row's buttons out. */
+.filter-select {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.filter-select > input {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+}
+
+.fs-chosen-pill {
+  flex-shrink: 0;
+}
+
+.arr-editor .item-row .filter-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.fs-panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.28);
+}
+
+.fs-panel .search-wrap {
+  margin: 0;
+}
+
+.fs-filters {
+  margin: 0;
+}
+
+.fs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 16rem;
+  overflow-y: auto;
+}
+
+.fs-group {
+  padding: 6px 6px 2px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.fs-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.fs-option:hover,
+.fs-option.active {
+  background: var(--surface-sunken);
+}
+
+.fs-option.chosen {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.fs-option-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.filter-select.mono .fs-option-label {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.fs-none {
+  padding: 6px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
 /* Assertion verdicts: a pass/fail count, then one pill per assertion whose
    title carries the value actually seen. */
 .verdicts {

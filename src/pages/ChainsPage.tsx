@@ -13,6 +13,8 @@ import { Notice } from "../components/Notice";
 import { SearchInput, matches } from "../components/SearchInput";
 import { TextField } from "../components/fields";
 import { StringList, type OptionGroup } from "../components/StringList";
+import { routeMetrics, type RouteMetric } from "../components/FilterSelect";
+import { listProbeResults, type HTTPProbe } from "../runApi";
 import type { ChainSpec } from "@goose-network/goose-sdk";
 
 /** What the engine resolves each layer against: its pools first, then its
@@ -79,6 +81,36 @@ export function layerOptions(
   ];
 }
 
+/**
+ * layerMetrics keys the probe verdicts by the BARE id a layer stores, so the
+ * picker can annotate and filter each choice by how its route last answered.
+ *
+ * A layer resolves pool-first (see layerOptions), so an id that names both a
+ * pool and an outbound takes the pool's verdict — the outbound's would describe
+ * a route the bare id cannot reach. Ids with no probe row are left absent, which
+ * the picker reads as "unprobed", not "failed".
+ */
+export function layerMetrics(
+  poolIds: ReadonlyArray<string | undefined>,
+  outboundIds: ReadonlyArray<string | undefined>,
+  byRoute: ReadonlyMap<string, RouteMetric>,
+): Map<string, RouteMetric> {
+  const out = new Map<string, RouteMetric>();
+  const pools = new Set<string>();
+  for (const id of poolIds) {
+    if (id === undefined || id === "") continue;
+    pools.add(id);
+    const m = byRoute.get(`pool:${id}`);
+    if (m !== undefined) out.set(id, m);
+  }
+  for (const id of outboundIds) {
+    if (id === undefined || id === "" || pools.has(id)) continue;
+    const m = byRoute.get(`outbound:${id}`);
+    if (m !== undefined) out.set(id, m);
+  }
+  return out;
+}
+
 /** Why a chain's layers block a save, as a token rather than prose: whatever
  *  `validate` returns lands in fieldErrors verbatim, and the form compares the
  *  stored value to choose its message — "layers" shows the "Add at least one
@@ -117,9 +149,22 @@ export function ChainsPage() {
   // The layer picker offers the engine's pools and outbounds, so this page
   // needs both lists, not just its own resource. One Promise.all, as the probe
   // page does: the two arrive together, so the picker cannot offer a half-built
-  // set of choices in between.
+  // set of choices in between. The probe history rides along so each choice can
+  // say how its route last answered — the reader filters a long fleet by what
+  // works, not just by what an id contains. A failed probe fetch leaves the
+  // picker a plain keyword filter (no metrics), never blocks the choices.
   const catalog = useAsync(
-    () => Promise.all([goose.listPools(), goose.listOutbounds()]),
+    () =>
+      Promise.all([
+        goose.listPools(),
+        goose.listOutbounds(),
+        // Keep whether the probe fetch succeeded: a failed or absent probe
+        // endpoint must leave the picker a plain keyword filter, not label
+        // every route "unprobed" (which reads as "the whole fleet is dead").
+        listProbeResults(goose, { n: 500 })
+          .then((rows) => ({ rows, ok: true }))
+          .catch(() => ({ rows: [] as HTTPProbe[], ok: false })),
+      ]),
     [goose],
   );
   const poolIds = useMemo(
@@ -129,6 +174,11 @@ export function ChainsPage() {
   const outboundIds = useMemo(
     () => (catalog.data?.[1] ?? []).map((o) => o.id),
     [catalog.data],
+  );
+  const probeResult = catalog.data?.[2];
+  const layerMetricMap = useMemo(
+    () => layerMetrics(poolIds, outboundIds, routeMetrics(probeResult?.rows ?? [])),
+    [poolIds, outboundIds, probeResult],
   );
   // The engine's own choices, before any draft joins them: empty exactly when
   // it has no pool or outbound to offer, which is when a picker would be a
@@ -261,6 +311,14 @@ export function ChainsPage() {
             // stay the text inputs they were: a select with no options would
             // show existing layers as blank and offer nothing to pick.
             options={canPick ? layerGroups : undefined}
+            // Once there is something to pick, the rows become filterable:
+            // type to narrow a long fleet, and filter/sort by probe result.
+            // Metrics appear only when the probe fetch succeeded and actually
+            // verdicted some offered route — a failed fetch (or none probed)
+            // leaves a plain keyword filter rather than pilling everything
+            // "unprobed".
+            filterable={canPick}
+            metrics={canPick && probeResult?.ok && layerMetricMap.size > 0 ? layerMetricMap : undefined}
           />
           {r.fieldErrors.layers === "layers" && (
             <Notice>Add at least one layer — an empty chain routes nothing.</Notice>

@@ -6,7 +6,7 @@
 // and white-screen the page when editing such a provider.
 
 import { describe, expect, it } from "vitest";
-import { pluginHelp, withPrefix } from "./ProvidersPage";
+import { pluginHelp, upstreamOptions, withPrefix } from "./ProvidersPage";
 
 describe("pluginHelp", () => {
   it("returns tailored guidance for every built-in zero-config network", () => {
@@ -84,5 +84,56 @@ describe("withPrefix", () => {
     const cfg = { username: "u", prefix: "old" };
     withPrefix(cfg, "");
     expect(cfg).toEqual({ username: "u", prefix: "old" });
+  });
+});
+
+describe("upstreamOptions", () => {
+  const values = (groups: ReturnType<typeof upstreamOptions>) =>
+    groups.flatMap((g) => g.options.map((o) => o.value));
+
+  it("always offers the special routes", () => {
+    const v = values(upstreamOptions([], [], ""));
+    expect(v).toContain("direct");
+    expect(v).toContain("access");
+  });
+
+  it("lists pools and outbounds as explicit prefixed refs, sorted", () => {
+    const groups = upstreamOptions(["zeta", "alpha"], ["relay-b", "relay-a"], "");
+    expect(groups.find((g) => g.label === "Pools")?.options.map((o) => o.value)).toEqual([
+      "pool:alpha",
+      "pool:zeta",
+    ]);
+    expect(groups.find((g) => g.label === "Outbounds")?.options.map((o) => o.value)).toEqual([
+      "outbound:relay-a",
+      "outbound:relay-b",
+    ]);
+  });
+
+  it("does not shadow an outbound whose id is also a pool (prefixes disambiguate)", () => {
+    // Unlike a bare chain layer, "pool:shared" and "outbound:shared" are distinct
+    // upstream routes, so both stay offerable.
+    const v = values(upstreamOptions(["shared"], ["shared"], ""));
+    expect(v).toContain("pool:shared");
+    expect(v).toContain("outbound:shared");
+  });
+
+  it("keeps a stored value the engine no longer knows selectable", () => {
+    const groups = upstreamOptions(["fast"], ["relay-a"], "gone-9");
+    expect(groups.find((g) => g.label === "Current")?.options).toEqual([
+      { value: "gone-9", label: "gone-9" },
+    ]);
+  });
+
+  it("does not re-list a stored value already among the choices", () => {
+    for (const current of ["direct", "access", "pool:fast", "outbound:relay-a", ""]) {
+      const groups = upstreamOptions(["fast"], ["relay-a"], current);
+      expect(groups.some((g) => g.label === "Current")).toBe(false);
+    }
+  });
+
+  it("ignores missing and empty ids", () => {
+    const groups = upstreamOptions([undefined, ""], [undefined, ""], "");
+    expect(groups.some((g) => g.label === "Pools")).toBe(false);
+    expect(groups.some((g) => g.label === "Outbounds")).toBe(false);
   });
 });

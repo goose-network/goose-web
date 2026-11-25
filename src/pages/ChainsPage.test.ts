@@ -9,7 +9,8 @@
 // hops than the form shows.
 
 import { describe, expect, it } from "vitest";
-import { chainLayerProblem, layerOptions } from "./ChainsPage";
+import { chainLayerProblem, layerMetrics, layerOptions } from "./ChainsPage";
+import type { RouteMetric } from "../components/FilterSelect";
 
 describe("layerOptions", () => {
   it("groups pools and outbounds, sorted, with bare ids as values", () => {
@@ -148,5 +149,52 @@ describe("chainLayerProblem", () => {
     // or failed to load. Do not "fix" chainLayerProblem into rejecting these.
     expect(chainLayerProblem(["gone-9"])).toBeNull();
     expect(chainLayerProblem(["pool-a", "gone-9", "relay-1"])).toBeNull();
+  });
+});
+
+describe("layerMetrics", () => {
+  const ok: RouteMetric = { ok: true, latencyNs: 5 };
+  const fail: RouteMetric = { ok: false, reason: "proxy_timeout" };
+
+  it("keys verdicts by bare id, resolving each to its prefixed probe route", () => {
+    const byRoute = new Map<string, RouteMetric>([
+      ["pool:fast", ok],
+      ["outbound:relay-a", fail],
+    ]);
+    const m = layerMetrics(["fast"], ["relay-a"], byRoute);
+    expect(m.get("fast")).toEqual(ok);
+    expect(m.get("relay-a")).toEqual(fail);
+  });
+
+  it("an id naming both a pool and an outbound takes the pool's verdict", () => {
+    // The bare id resolves pool-first, so the outbound's verdict would describe
+    // a route the layer cannot reach.
+    const byRoute = new Map<string, RouteMetric>([
+      ["pool:shared", ok],
+      ["outbound:shared", fail],
+    ]);
+    const m = layerMetrics(["shared"], ["shared"], byRoute);
+    expect(m.get("shared")).toEqual(ok);
+  });
+
+  it("leaves a shadowed id absent when its pool is unprobed, even if the outbound was probed", () => {
+    // The skip is keyed on "is this id a pool", not "already have a verdict":
+    // an unprobed pool must not borrow the shadowed outbound's verdict, or the
+    // picker would pill the bare layer reachable on a route it cannot take.
+    const byRoute = new Map<string, RouteMetric>([["outbound:shared", ok]]);
+    const m = layerMetrics(["shared"], ["shared"], byRoute);
+    expect(m.has("shared")).toBe(false);
+  });
+
+  it("leaves an unprobed id absent, never a failed verdict", () => {
+    const m = layerMetrics(["fast"], ["relay-b"], new Map([["pool:fast", ok]]));
+    expect(m.has("relay-b")).toBe(false);
+    expect(m.size).toBe(1);
+  });
+
+  it("ignores missing and empty ids", () => {
+    const byRoute = new Map<string, RouteMetric>([["pool:fast", ok]]);
+    const m = layerMetrics([undefined, "", "fast"], [undefined, ""], byRoute);
+    expect([...m.keys()]).toEqual(["fast"]);
   });
 });

@@ -5,6 +5,7 @@
 
 import { useMemo, useState } from "react";
 import { useSdk } from "../sdk";
+import { useAsync } from "../useAsync";
 import { useResource } from "../useResource";
 import { collect, httpUrl, required, upstreamRoute } from "../validate";
 import { PageHeader } from "../components/PageHeader";
@@ -14,7 +15,9 @@ import { ConfirmButton } from "../components/ConfirmButton";
 import { SearchInput, matches } from "../components/SearchInput";
 import { SelectField, TextField } from "../components/fields";
 import { KvEditor } from "../components/KvEditor";
-import { StringList } from "../components/StringList";
+import { StringList, type OptionGroup } from "../components/StringList";
+import { FilterSelect, routeMetrics, type RouteMetric } from "../components/FilterSelect";
+import { listProbeResults, type HTTPProbe } from "../runApi";
 import { ProvidersStatusCard } from "./ProvidersStatusCard";
 import type { ProviderSpec } from "@goose-network/goose-sdk";
 
@@ -72,6 +75,44 @@ export function ProvidersPage() {
       ),
     [r.items, filter],
   );
+
+  // The upstream-route picker offers the engine's pools and outbounds (as
+  // explicit pool:/outbound: refs) plus the special routes, so the form needs
+  // those lists alongside its own resource. The probe history rides along to
+  // annotate each route with how it last answered; a failed fetch leaves a
+  // plain keyword filter, and the picker still allows any typed route.
+  const catalog = useAsync(
+    () =>
+      Promise.all([
+        goose.listPools(),
+        goose.listOutbounds(),
+        // Keep whether the probe fetch succeeded: a failed or absent probe
+        // endpoint must leave the picker a plain keyword filter, not label
+        // every route "unprobed" (which reads as "the whole fleet is dead").
+        listProbeResults(goose, { n: 500 })
+          .then((rows) => ({ rows, ok: true }))
+          .catch(() => ({ rows: [] as HTTPProbe[], ok: false })),
+      ]),
+    [goose],
+  );
+  const upstreamGroups = useMemo(
+    () =>
+      upstreamOptions(
+        (catalog.data?.[0] ?? []).map((p) => p.id),
+        (catalog.data?.[1] ?? []).map((o) => o.id),
+        r.draft?.upstream_proxy ?? "",
+      ),
+    [catalog.data, r.draft],
+  );
+  const probeResult = catalog.data?.[2];
+  // Metrics only when the probe fetch succeeded and verdicted at least one
+  // route; otherwise the picker stays a plain keyword filter (allowCustom still
+  // lets any route be typed). An empty map would pill everything "unprobed".
+  const upstreamMetrics = useMemo(() => {
+    if (!probeResult?.ok) return undefined;
+    const m = routeMetrics(probeResult.rows);
+    return m.size > 0 ? m : undefined;
+  }, [probeResult]);
 
   const columns: Array<Column<ProviderSpec>> = [
     { key: "id", header: "ID", className: "mono", render: (p) => p.id },
@@ -141,6 +182,8 @@ export function ProvidersPage() {
             setDraft={r.setDraft}
             fieldErrors={r.fieldErrors}
             idLocked={!r.isNew}
+            upstreamGroups={upstreamGroups}
+            upstreamMetrics={upstreamMetrics}
           />
         </FormCard>
       )}
@@ -192,16 +235,71 @@ function urlOf(p: ProviderSpec): string {
   return typeof u === "string" ? u : "";
 }
 
+/**
+ * upstreamOptions builds the upstream-route picker's choices: the special
+ * routes the engine knows by name, then every pool and outbound as an explicit
+ * prefixed reference, then the stored value if it names none of them.
+ *
+ * Unlike a chain layer (a BARE id resolved pool-first), an upstream route spells
+ * its kind — "pool:x" and "outbound:x" are distinct routes even when one id names
+ * both — so neither list shadows the other. The empty choice (blank = direct) is
+ * the picker's placeholder, not a group entry. A stored value the engine no
+ * longer knows keeps an option so editing the provider never blanks its route;
+ * `allowCustom` on the picker still lets the reader type any other route.
+ */
+export function upstreamOptions(
+  poolIds: ReadonlyArray<string | undefined>,
+  outboundIds: ReadonlyArray<string | undefined>,
+  current: string,
+): OptionGroup[] {
+  const ids = (list: ReadonlyArray<string | undefined>) =>
+    [...new Set(list.filter((id): id is string => id !== undefined && id !== ""))].sort();
+  const pools = ids(poolIds);
+  const outbounds = ids(outboundIds);
+  const groups: OptionGroup[] = [
+    {
+      label: "Special",
+      options: [
+        { value: "direct", label: "direct — the engine host's network" },
+        { value: "access", label: "access — dial direct first, then the access pool" },
+      ],
+    },
+  ];
+  if (pools.length > 0) {
+    groups.push({ label: "Pools", options: pools.map((id) => ({ value: `pool:${id}`, label: `pool:${id}` })) });
+  }
+  if (outbounds.length > 0) {
+    groups.push({
+      label: "Outbounds",
+      options: outbounds.map((id) => ({ value: `outbound:${id}`, label: `outbound:${id}` })),
+    });
+  }
+  const known = new Set<string>([
+    "direct",
+    "access",
+    ...pools.map((id) => `pool:${id}`),
+    ...outbounds.map((id) => `outbound:${id}`),
+  ]);
+  if (current !== "" && !known.has(current)) {
+    groups.push({ label: "Current", options: [{ value: current, label: current }] });
+  }
+  return groups;
+}
+
 function ProviderForm({
   draft,
   setDraft,
   fieldErrors,
   idLocked,
+  upstreamGroups,
+  upstreamMetrics,
 }: {
   draft: ProviderSpec;
   setDraft: (d: ProviderSpec) => void;
   fieldErrors: Record<string, string>;
   idLocked: boolean;
+  upstreamGroups: OptionGroup[];
+  upstreamMetrics: ReadonlyMap<string, RouteMetric> | undefined;
 }) {
   const set = (patch: Partial<ProviderSpec>) => setDraft({ ...draft, ...patch });
   const cfg = draft.config ?? {};
@@ -267,17 +365,20 @@ function ProviderForm({
           placeholder={help.urlPlaceholder}
           onChange={(url) => setCfg({ ...cfg, url })}
         />
-        <TextField
+        <FilterSelect
           id="prov-upstream"
           label="Upstream proxy"
           mono
           value={draft.upstream_proxy ?? ""}
           error={fieldErrors.upstream}
-          placeholder="pool:relays (optional)"
+          placeholder="(direct — blank)"
+          groups={upstreamGroups}
+          metrics={upstreamMetrics}
+          allowCustom
           onChange={(upstream_proxy) =>
             set({ upstream_proxy: upstream_proxy.trim() })
           }
-          hint="Routes this provider's own URL fetches through an engine route instead of the engine host's network — for subscription URLs the host cannot reach directly. One of: outbound:<id>, pool:<id>, a bare pool/outbound id, or “access” (dial direct first, then the access pool). Blank = direct."
+          hint="Routes this provider's own URL fetches through an engine route instead of the engine host's network — for subscription URLs the host cannot reach directly. Pick a route below, or type one: outbound:<id>, pool:<id>, a bare pool/outbound id, or “access” (dial direct first, then the access pool). Blank = direct."
         />
       </div>
       <PluginHelp plugin={plugin} />
