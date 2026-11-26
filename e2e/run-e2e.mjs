@@ -64,6 +64,17 @@ async function apiDelete(path) {
   );
 }
 
+// Cleanup variant: a 404 means the fixture was never created (the save or
+// seed failed), which is expected absence — but any OTHER failure is real
+// and must surface, not leak fixtures into the next test's premises.
+async function apiDeleteIfPresent(path) {
+  const res = await page.request.delete(`${BASE}/api/${path.replace(/^\//, "")}`);
+  assert.ok(
+    res.status() === 200 || res.status() === 204 || res.status() === 404,
+    `DELETE /api/${path} -> ${res.status()}`,
+  );
+}
+
 // Helper: one real request through the engine's HTTP inbound.
 //
 // The request-target has to be ABSOLUTE-form (`GET http://host/path`). With an
@@ -367,13 +378,15 @@ await test("pool form shows selector and filter examples while configuring", asy
       `selector ${strategy} example missing (looked for ${marker})`,
     );
   }
-  // Each filter row's Params example follows that row's filter type.
+  // Each JSON filter row's Params example follows that row's filter type.
+  // The protocol filter is not a JSON row: it edits allow/deny as chips over
+  // the fleet's protocols (and auto-includes their outbounds), so it gets
+  // its own assertions below instead of an example marker.
   await page.click("button:has-text('Add filter')");
   const filterHint = page.locator(".kv-editor:has(#filter-params-0) .field-hint");
   for (const [type, marker] of [
     ["location", '"exclude"'],
     ["latency", '"max_ms": 300'],
-    ["protocol", '"allow"'],
   ]) {
     await page.locator("#filter-type-0").selectOption(type);
     const hintText = await filterHint.innerText();
@@ -382,6 +395,15 @@ await test("pool form shows selector and filter examples while configuring", asy
       `filter ${type} example missing (looked for ${marker})`,
     );
   }
+  await page.locator("#filter-type-0").selectOption("protocol");
+  await page.waitForSelector("#filter-params-0-allow-label", { timeout: 5_000 });
+  const allowHint = await page
+    .locator("#filter-params-0-allow-hint")
+    .innerText();
+  assert.ok(
+    allowHint.includes("automatically includes"),
+    "protocol allow chips do not say they auto-include outbounds",
+  );
 
   // Both editors offer to insert what they show, and insert the strategy's own
   // shape — an example you can put in the field, not one you have to retype.
@@ -413,6 +435,139 @@ await test("pool form shows selector and filter examples while configuring", asy
   await page.click("form button:has-text('Cancel')");
   await page.click("form button:has-text('Discard changes?')");
   await page.waitForSelector("#pool-id", { state: "detached", timeout: 5_000 });
+});
+
+await test("pool form picks outbounds by keyword and auto-includes a protocol filter", async () => {
+  // The keyword picker and the protocol filter's auto-inclusion need a fleet
+  // to pick from. Seed thirteen http outbounds (so the keyword box appears —
+  // it earns its place above twelve choices, the probe page's rule) plus one
+  // socks5, and take them all away whatever happens below.
+  const httpIds = Array.from({ length: 13 }, (_, i) => `e2e-kw-${String(i).padStart(2, "0")}`);
+  const socksId = "e2e-pool-socks";
+  const poolId = "e2e-pool-picker";
+  try {
+    // The seeds ride inside the try: a mid-loop failure must still reach the
+    // finally, or the half-seeded fleet leaks into the metrics test's
+    // direct-only premise.
+    for (const id of httpIds) {
+      await apiPost("outbounds", { id, protocol: "http", config: { address: "127.0.0.1:9" } });
+    }
+    await apiPost("outbounds", { id: socksId, protocol: "socks5", config: { address: "127.0.0.1:9" } });
+    await page.goto(`${BASE}/pools`, { waitUntil: "networkidle" });
+    await page.click("button:has-text('New pool')");
+    await page.locator("#pool-id").fill(poolId);
+
+    // The fleet arrived as chips, and the keyword box is offered.
+    await page.waitForSelector("#pool-outbound-filter", { timeout: 5_000 });
+    // Typing a keyword narrows the fleet; "Select all filtered" commits exactly
+    // the matches — the probe page's batch behavior, over ids and protocols.
+    await page.locator("#pool-outbound-filter").fill("e2e-kw-0");
+    await page.click("button:has-text('Select all filtered')");
+    // e2e-kw-0 matches 00..09 (ten) and nothing else: exactly ten chips read
+    // checked, and the socks5 chip — no keyword match, not selected — is not
+    // in the filtered box at all (the probe page's visibleChoices rule).
+    assert.equal(
+      await page.locator(".chip-scroll .chip.on").count(),
+      10,
+      "Select all filtered did not check exactly the keyword matches",
+    );
+    assert.equal(
+      await page.locator(`.chip-scroll .chip:has-text("${socksId}")`).count(),
+      0,
+      "a non-matching, unselected outbound showed through the keyword filter",
+    );
+
+    // A protocol filter auto-includes the outbounds it names: checking socks5
+    // in the allowlist pulls the socks5 outbound into the member list.
+    await page.click("button:has-text('Add filter')");
+    await page.locator("#filter-type-0").selectOption("protocol");
+    await page.waitForSelector("#filter-params-0-allow-label", { timeout: 5_000 });
+    await page
+      .locator(`[aria-labelledby="filter-params-0-allow-label"] .chip:has-text("socks5") input`)
+      .check();
+    await page.waitForFunction(
+      (id) => {
+        const chips = [...document.querySelectorAll(".chip-scroll .chip")];
+        const chip = chips.find((c) => c.textContent.includes(id));
+        return chip !== undefined && chip.classList.contains("on");
+      },
+      socksId,
+      { timeout: 5_000 },
+    );
+
+    await page.click("form button:has-text('Save')");
+    await page.waitForSelector("#pool-id", { state: "detached", timeout: 5_000 });
+
+    // The engine stored exactly what the form committed: the ten keyword
+    // matches plus the one the protocol filter auto-included.
+    const pools = await api("pools");
+    const saved = pools.find((p) => p.id === poolId);
+    assert.ok(saved, "the pool did not reach the engine");
+    const members = saved.outbound_ids ?? [];
+    // Pin the EXACT eleven: length + a couple of includes would let a wrong
+    // ten-subset (say 00..08 + 11) pass every assertion.
+    const expected = [...httpIds.slice(0, 10), socksId].sort();
+    assert.deepEqual(
+      [...members].sort(),
+      expected,
+      "the pool did not store exactly the keyword matches plus the auto-included socks5",
+    );
+    assert.deepEqual(
+      saved.filters?.[0]?.params?.allow,
+      ["socks5"],
+      "protocol allowlist did not persist",
+    );
+
+    // --- the engine AND-composes filters: a second protocol row must not
+    // confiscate what the first still admits, nor add what the first rejects.
+    await page.click(`table.data tbody tr:has-text("${poolId}") button:has-text('Edit')`);
+    await page.waitForSelector("#pool-id", { timeout: 5_000 });
+    await page.click("button:has-text('Add filter')");
+    await page.locator("#filter-type-1").selectOption("protocol");
+    await page.waitForSelector("#filter-params-1-allow-label", { timeout: 5_000 });
+    const row2Sock = page.locator(
+      '[aria-labelledby="filter-params-1-allow-label"] .chip:has-text("socks5") input',
+    );
+    await row2Sock.check();
+    await row2Sock.uncheck();
+    // Emptying row 2 leaves row 1 naming socks5: the auto-included member
+    // stays (the old per-row sync silently deleted it, emptying the pool).
+    await page.waitForFunction(
+      () =>
+        document.querySelectorAll(
+          '[aria-labelledby="pool-outbounds-list-label"] .item-row',
+        ).length === 11,
+      { timeout: 5_000 },
+    );
+    // A name the fleet does not run is addable by text, and auto-includes
+    // nothing (no outbound runs it).
+    await page.locator("#filter-params-0-allow-add").fill("geph");
+    await page
+      .locator('.chip-batch:has(#filter-params-0-allow-add) button:has-text("Add")')
+      .click();
+    await page.waitForSelector(
+      '[aria-labelledby="filter-params-0-allow-label"] .chip.on:has-text("geph")',
+      { timeout: 5_000 },
+    );
+    await page.click("form button:has-text('Save')");
+    await page.waitForSelector("#pool-id", { state: "detached", timeout: 5_000 });
+    const edited = (await api("pools")).find((p) => p.id === poolId);
+    assert.deepEqual(
+      [...(edited.outbound_ids ?? [])].sort(),
+      expected,
+      "the cross-filter edit changed the stored members",
+    );
+    assert.deepEqual(
+      edited.filters?.[0]?.params?.allow,
+      ["socks5", "geph"],
+      "the typed protocol name did not persist",
+    );
+  } finally {
+    await apiDeleteIfPresent(`pools/${poolId}`);
+    for (const id of [...httpIds, socksId]) {
+      await apiDeleteIfPresent(`outbounds/${id}`);
+    }
+  }
 });
 
 await test("outbound editor opens inline under its row, not at the top", async () => {
