@@ -21,6 +21,7 @@ import { formatDuration, formatTime } from "../format";
 import {
   applyFullProbe,
   cancelFullProbe,
+  fullProbeJobGone,
   getFullProbe,
   listFullProbes,
   startFullProbe,
@@ -32,8 +33,10 @@ import {
   buildFullProbeRequest,
   FULL_PROBE_CAPS,
   FULL_PROBE_DEFAULTS,
+  FULL_PROBE_POLL_MS,
   FULL_PROBE_TARGET_PRESETS,
   fullProbeFormProblems,
+  fullProbePollDelay,
   fullProbeProgress,
   fullProbeRunning,
   INITIAL_FULL_PROBE_FIELDS,
@@ -43,106 +46,230 @@ import {
   type FullProbeFields,
 } from "./fullProbeSpec";
 
-/** How often the live card re-reads a running job. The engine snapshots
- *  about once a second, so faster polling would only re-serve the same
- *  numbers. */
-const POLL_EVERY_MS = 1_500;
-
 export function FullProbesPage() {
-  const { goose } = useSdk();
+  const { goose, engineKey } = useSdk();
   const { toast } = useToast();
 
   const [form, setForm] = useState<FullProbeFields>(INITIAL_FULL_PROBE_FIELDS);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
-  /** The job the live card follows; null shows the newest from history. */
-  const [watchId, setWatchId] = useState<string | null>(null);
+  /** The job the live card follows, tagged with the engine it lives on;
+   *  null shows the newest from history. The tag matters: a watch pinned
+   *  on engine A must not poll A's job id against engine B after a switch
+   *  (the 404 would masquerade as a pruned job). */
+  const [watch, setWatch] = useState<{ id: string; engine: string } | null>(null);
   /** Results of the last apply, shown until the next one. */
   const [applied, setApplied] = useState<FullProbeApplyResult[] | null>(null);
   const [applyError, setApplyError] = useState<string | null>(null);
   const [applying, setApplying] = useState(false);
 
-  const history = useAsync(() => listFullProbes(goose, 20), [goose]);
+  // Tag the list with the engine it came from: useAsync keeps the previous
+  // data until the new fetch lands, and right after an engine switch that
+  // data names the OLD engine's jobs. Following its newest id would poll a
+  // foreign job id and surface a bogus "pruned from history" notice.
+  const history = useAsync(
+    async () => ({ engine: engineKey, jobs: await listFullProbes(goose, 20) }),
+    [goose, engineKey],
+  );
+  const freshJobs = history.data?.engine === engineKey ? history.data.jobs : undefined;
 
-  // The live job: poll while it runs, stop when it lands. watchId picks the
-  // job explicitly; otherwise follow the newest one the history knows.
-  const newestId = history.data?.[0]?.id;
+  // The live job: poll while it runs, stop when it lands. A watch pinned on
+  // the current engine picks the job explicitly; otherwise follow the newest
+  // one the CURRENT engine's history knows (undefined until it loads).
+  const watchId = watch !== null && watch.engine === engineKey ? watch.id : undefined;
+  const newestId = freshJobs?.[0]?.id;
   const activeId = watchId ?? newestId;
   const [live, setLive] = useState<FullProbeJob | undefined>(undefined);
   const [liveError, setLiveError] = useState<string | null>(null);
+  /** A gone-job (404) notice lives outside liveError: the gone branch
+   *  itself changes activeId (watch reset / history reload), and the poll
+   *  effect clears liveError on every switch — which would wipe the very
+   *  message explaining where the sweep went. Dismissable, and cleared
+   *  when a new sweep starts. */
+  const [goneNotice, setGoneNotice] = useState<string | null>(null);
   const timer = useRef<number | undefined>(undefined);
+  /** Fences the poll chain: bumping it orphans every in-flight fetch and
+   *  pending timer from an earlier job/engine, so a stale answer can never
+   *  paint the wrong card or double-schedule the chain. */
+  const pollEpoch = useRef(0);
+  /** Mirrors activeId for async handlers: cancel/apply capture the job at
+   *  click time, and their deferred work must not touch the card (or the
+   *  poll chain) once the reader has switched jobs or engines. */
+  const activeIdRef = useRef<string | undefined>(undefined);
+  activeIdRef.current = activeId;
+  /** Mirrors the engine identity (URL, not client instance): job ids alone
+   *  can't fence an engine switch — a pinned watch can name a job that
+   *  exists on both engines, and a stale closure's re-poll would re-anchor
+   *  the chain to the old engine. Deferred work also compares the engine
+   *  captured at call time against this. Identity is the URL so a
+   *  reconnect to the SAME engine (new client instance) doesn't discard
+   *  work that landed on the engine still on screen. */
+  const engineKeyRef = useRef(engineKey);
+  engineKeyRef.current = engineKey;
 
   const poll = useCallback(
-    (id: string) => {
+    (id: string, failures = 0) => {
+      // One chain per invocation: cancel's manual re-poll must not run
+      // alongside the scheduled one.
+      const epoch = ++pollEpoch.current;
+      window.clearTimeout(timer.current);
       getFullProbe(goose, id)
         .then((j) => {
+          if (epoch !== pollEpoch.current) return;
           setLive(j);
           setLiveError(null);
           if (fullProbeRunning(j)) {
-            timer.current = window.setTimeout(() => poll(id), POLL_EVERY_MS);
+            timer.current = window.setTimeout(
+              () => poll(id),
+              FULL_PROBE_POLL_MS,
+            );
           } else {
             history.reload();
           }
         })
-        .catch((err: unknown) => setLiveError(errMessage(err)));
+        .catch((err: unknown) => {
+          if (epoch !== pollEpoch.current) return;
+          if (fullProbeJobGone(err)) {
+            // The job is gone (pruned from history or lost in a restart):
+            // stop following it, surface why, and let Start work again.
+            // The implicit job switch must drop the previous job's apply
+            // results too, or they would render under the new card.
+            setGoneNotice(errMessage(err));
+            setLive(undefined);
+            setApplied(null);
+            setApplyError(null);
+            // Match the engine too: job ids can coincide across engines,
+            // and this 404 must not unpin a watch pinned on another one.
+            setWatch((w) =>
+              w !== null && w.id === id && w.engine === engineKey ? null : w,
+            );
+            history.reload();
+            return;
+          }
+          // Transient failures must not stop live updates: retry with a
+          // capped backoff, keeping the last snapshot on screen.
+          setLiveError(errMessage(err));
+          timer.current = window.setTimeout(
+            () => poll(id, failures + 1),
+            fullProbePollDelay(failures + 1),
+          );
+        });
     },
     // history.reload is stable (useAsync's useCallback); listing it would
     // restart the poll chain on every history render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [goose],
   );
+  /** The latest poll closure, for deferred re-polls (cancel). The fence
+   *  guarantees the same engine, but a same-URL reconnect rotates the
+   *  client (and maybe the token): the click-time closure would re-anchor
+   *  the chain to a superseded client and retry forever on a revoked
+   *  token, orphaning the healthy chain the poll effect just restarted. */
+  const pollRef = useRef(poll);
+  pollRef.current = poll;
 
   useEffect(() => {
+    // Fence + cancel any chain from the previous job/engine before the new
+    // one starts; in-flight fetches from it are orphaned by the bump.
+    pollEpoch.current++;
     window.clearTimeout(timer.current);
     setLive(undefined);
     setLiveError(null);
+    // The followed job changed: the previous job's apply results must not
+    // render under the new card (same rule as the Watch handler).
+    setApplied(null);
+    setApplyError(null);
     if (activeId !== undefined && activeId !== "") poll(activeId);
-    return () => window.clearTimeout(timer.current);
+    return () => {
+      pollEpoch.current++;
+      window.clearTimeout(timer.current);
+    };
   }, [activeId, poll]);
+
+  // Engine switches drop the gone-job notice: it explains a job on the
+  // previous engine. Keyed on engineKey alone — the poll effect can't
+  // clear it, because the gone branch itself changes activeId and would
+  // wipe the fresh notice it just set. (A reconnect to the same engine
+  // keeps the notice: the job really is gone from that engine.)
+  useEffect(() => {
+    setGoneNotice(null);
+  }, [engineKey]);
 
   const problems = fullProbeFormProblems(form);
   const canStart =
     Object.keys(problems).length === 0 && !starting && !fullProbeRunning(live);
 
   const start = async () => {
+    const g = goose;
+    const key = engineKey;
     setStarting(true);
     setStartError(null);
     setApplied(null);
+    setGoneNotice(null);
     try {
-      const j = await startFullProbe(goose, buildFullProbeRequest(form));
-      if (j.id !== undefined) setWatchId(j.id);
-      toast("Full active probing started", "good");
-      history.reload();
+      const j = await startFullProbe(g, buildFullProbeRequest(form));
+      // The engine may have switched while the POST was in flight: the
+      // new job lives on the old engine, so don't pin the card to it.
+      if (engineKeyRef.current === key) {
+        if (j.id !== undefined) setWatch({ id: j.id, engine: key });
+        toast("Full active probing started", "good");
+        history.reload();
+      }
     } catch (err) {
-      setStartError(errMessage(err));
+      if (engineKeyRef.current === key) setStartError(errMessage(err));
     } finally {
       setStarting(false);
     }
   };
 
   const cancel = async () => {
-    if (live?.id === undefined) return;
+    const id = live?.id;
+    const g = goose;
+    const key = engineKey;
+    if (id === undefined) return;
     try {
-      await cancelFullProbe(goose, live.id);
-      toast("Sweep canceled", "good");
-      poll(live.id);
+      const canceled = await cancelFullProbe(g, id);
+      // The DELETE may resolve after a watch/engine switch: touching the
+      // card or the poll chain then would orphan the new job's chain and
+      // paint the old job over it. The engine check matters even when the
+      // id matches — a pinned watch can name a job on both engines, and
+      // poll(id) here would re-anchor the chain to the closure's engine.
+      if (activeIdRef.current !== id || engineKeyRef.current !== key) return;
+      if (canceled) {
+        toast("Sweep canceled", "good");
+      } else {
+        // 404 resolves false: the job is already gone, not canceled now.
+        toast("That sweep is no longer on the engine", "bad");
+      }
+      pollRef.current(id);
     } catch (err) {
+      if (activeIdRef.current !== id || engineKeyRef.current !== key) return;
       setLiveError(errMessage(err));
+      // A 409 (already finished) leaves a stale "running" card; re-read so
+      // the terminal state lands and Start unblocks.
+      pollRef.current(id);
     }
   };
 
   const apply = async () => {
-    if (live?.id === undefined) return;
+    const id = live?.id;
+    const g = goose;
+    const key = engineKey;
+    if (id === undefined) return;
     setApplying(true);
     setApplyError(null);
     try {
-      const res = await applyFullProbe(goose, live.id);
+      const res = await applyFullProbe(g, id);
+      // An apply resolving after a watch/engine switch must not attribute
+      // the old job's created inbounds to the new card.
+      if (activeIdRef.current !== id || engineKeyRef.current !== key) return;
       setApplied(res.results ?? []);
       toast(
         `Created ${res.results?.length ?? 0} inbound${(res.results?.length ?? 0) === 1 ? "" : "s"} from the proved paths`,
         "good",
       );
     } catch (err) {
+      if (activeIdRef.current !== id || engineKeyRef.current !== key) return;
       setApplyError(errMessage(err));
     } finally {
       setApplying(false);
@@ -190,7 +317,7 @@ export function FullProbesPage() {
           type="button"
           className="ghost"
           onClick={() => {
-            setWatchId(j.id ?? null);
+            setWatch(j.id !== undefined ? { id: j.id, engine: engineKey } : null);
             setApplied(null);
             setApplyError(null);
           }}
@@ -298,6 +425,10 @@ export function FullProbesPage() {
           </button>
         </div>
       </div>
+
+      {goneNotice !== null && (
+        <Notice onDismiss={() => setGoneNotice(null)}>{goneNotice}</Notice>
+      )}
 
       {live !== undefined && (
         <div className="card">
@@ -464,9 +595,9 @@ export function FullProbesPage() {
         <DataTable
           caption="Full active probing jobs"
           columns={columns}
-          rows={history.data ?? []}
+          rows={freshJobs ?? []}
           rowKey={(j) => j.id ?? ""}
-          loading={history.loading && history.data === undefined}
+          loading={history.loading && freshJobs === undefined}
           error={history.error}
           onRetry={history.reload}
           empty={

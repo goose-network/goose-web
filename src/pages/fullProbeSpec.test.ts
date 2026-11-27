@@ -9,7 +9,10 @@ import {
   bestPaths,
   buildFullProbeRequest,
   FULL_PROBE_CAPS,
+  FULL_PROBE_POLL_MAX_MS,
+  FULL_PROBE_POLL_MS,
   fullProbeFormProblems,
+  fullProbePollDelay,
   fullProbeProgress,
   fullProbeRunning,
   INITIAL_FULL_PROBE_FIELDS,
@@ -65,6 +68,57 @@ describe("fullProbeFormProblems", () => {
         concurrency: FULL_PROBE_CAPS.maxConcurrency,
       }),
     ).toEqual({});
+  });
+
+  it("rejects fractional knobs — the wire fields are ints", () => {
+    expect(
+      fullProbeFormProblems({ ...okFields, timeoutSec: 2.5 }).timeoutSec,
+    ).toBeDefined();
+    expect(
+      fullProbeFormProblems({ ...okFields, maxDepth: 1.5 }).maxDepth,
+    ).toBeDefined();
+    expect(
+      fullProbeFormProblems({ ...okFields, rps: 100.25 }).rps,
+    ).toBeDefined();
+    expect(
+      fullProbeFormProblems({ ...okFields, concurrency: 0.5 }).concurrency,
+    ).toBeDefined();
+  });
+
+  it("rejects NaN and Infinity, which slip past bare range comparisons", () => {
+    // NumberField emits Number(raw); NaN < 0 and NaN > max are both false,
+    // so without the integer guard a NaN knob would validate clean.
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      const p = fullProbeFormProblems({
+        ...okFields,
+        timeoutSec: bad,
+        maxDepth: bad,
+        rps: bad,
+        concurrency: bad,
+      });
+      expect(p.timeoutSec).toBeDefined();
+      expect(p.maxDepth).toBeDefined();
+      expect(p.rps).toBeDefined();
+      expect(p.concurrency).toBeDefined();
+    }
+  });
+});
+
+describe("fullProbePollDelay", () => {
+  it("doubles from the normal cadence per consecutive failure", () => {
+    expect(fullProbePollDelay(1)).toBe(FULL_PROBE_POLL_MS * 2);
+    expect(fullProbePollDelay(2)).toBe(FULL_PROBE_POLL_MS * 4);
+  });
+
+  it("caps the backoff so a long outage neither hammers nor freezes", () => {
+    expect(fullProbePollDelay(3)).toBe(FULL_PROBE_POLL_MAX_MS);
+    expect(fullProbePollDelay(50)).toBe(FULL_PROBE_POLL_MAX_MS);
+    expect(fullProbePollDelay(10_000)).toBe(FULL_PROBE_POLL_MAX_MS);
+  });
+
+  it("never waits less than the normal cadence", () => {
+    expect(fullProbePollDelay(0)).toBe(FULL_PROBE_POLL_MS);
+    expect(fullProbePollDelay(-3)).toBe(FULL_PROBE_POLL_MS);
   });
 });
 

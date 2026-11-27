@@ -7,7 +7,7 @@
 // keeping base URL, bearer token and error shaping in the one place they
 // already live — the same arrangement as runApi.ts.
 
-import type { Goose } from "@goose-network/goose-sdk";
+import { GooseApiError, type Goose } from "@goose-network/goose-sdk";
 import { apiMessage } from "./runApi";
 
 /** One successful path (`core.FullProbePath`): the ordered outbound IDs of a
@@ -133,6 +133,33 @@ async function friendly<T>(p: Promise<T>): Promise<T> {
   }
 }
 
+/** True when an item-route call failed with 404: the job is gone (pruned
+ *  from history, or an engine restart lost it) — not "this engine has no
+ *  such endpoint". The page stops following a gone job instead of polling
+ *  it forever. */
+export function fullProbeJobGone(err: unknown): boolean {
+  return err instanceof GooseApiError && err.status === 404;
+}
+
+/** Like friendly, but for /api/probes/full/{id} routes: a 404 there means
+ *  the job is missing, so it keeps the GooseApiError (status intact for
+ *  fullProbeJobGone) with job-specific wording rather than apiMessage's
+ *  endpoint-level "needs a newer engine build". */
+async function friendlyJob<T>(id: string, p: Promise<T>): Promise<T> {
+  try {
+    return await p;
+  } catch (err) {
+    if (fullProbeJobGone(err)) {
+      throw new GooseApiError(
+        404,
+        (err as GooseApiError).body,
+        `No full-probe job "${id}" on this engine — it was pruned from history or lost in a restart.`,
+      );
+    }
+    throw new Error(apiMessage(err));
+  }
+}
+
 /** Starts a full active probing job (201 with the running snapshot). */
 export async function startFullProbe(
   goose: Goose,
@@ -155,12 +182,15 @@ export async function listFullProbes(
   return res ?? [];
 }
 
-/** One job's current snapshot (live while running, durable after). */
+/** One job's current snapshot (live while running, durable after). A 404
+ *  rejects with a GooseApiError (see fullProbeJobGone) worded as a missing
+ *  job, not a missing endpoint. */
 export async function getFullProbe(
   goose: Goose,
   id: string,
 ): Promise<FullProbeJob> {
-  return friendly(
+  return friendlyJob(
+    id,
     goose.client.get<FullProbeJob>(
       `/api/probes/full/${encodeURIComponent(id)}`,
     ),
@@ -191,7 +221,8 @@ export async function applyFullProbe(
   id: string,
   spec: FullProbeApplySpec = {},
 ): Promise<FullProbeApplyResponse> {
-  return friendly(
+  return friendlyJob(
+    id,
     goose.client.send<FullProbeApplyResponse>(
       "POST",
       `/api/probes/full/${encodeURIComponent(id)}/inbounds`,

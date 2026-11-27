@@ -53,24 +53,44 @@ export const INITIAL_FULL_PROBE_FIELDS: FullProbeFields = {
   concurrency: 0,
 };
 
-/** Validation problems with the form, keyed by field. Empty object = ok. */
+/** Validation problems with the form, keyed by field. Empty object = ok.
+ *  NumberField emits Number(raw), so a fractional knob ("2.5") or a NaN can
+ *  reach here; Number.isInteger rejects both (and Infinity) — bare range
+ *  comparisons would let NaN through, since NaN < 0 and NaN > max are both
+ *  false. The engine's wire fields are ints, so fractions must not pass. */
 export function fullProbeFormProblems(
   f: FullProbeFields,
 ): Partial<Record<keyof FullProbeFields, string>> {
   const out: Partial<Record<keyof FullProbeFields, string>> = {};
   const target = httpUrl(f.target, "Use an absolute http(s) URL");
   if (target !== null) out.target = target;
-  if (f.timeoutSec < 0 || f.timeoutSec > FULL_PROBE_CAPS.maxTimeoutSec) {
-    out.timeoutSec = `0–${FULL_PROBE_CAPS.maxTimeoutSec} seconds (0 = default ${FULL_PROBE_DEFAULTS.timeoutSec})`;
+  if (
+    !Number.isInteger(f.timeoutSec) ||
+    f.timeoutSec < 0 ||
+    f.timeoutSec > FULL_PROBE_CAPS.maxTimeoutSec
+  ) {
+    out.timeoutSec = `Whole seconds 0–${FULL_PROBE_CAPS.maxTimeoutSec} (0 = default ${FULL_PROBE_DEFAULTS.timeoutSec})`;
   }
-  if (f.maxDepth < 0 || f.maxDepth > FULL_PROBE_CAPS.maxDepth) {
-    out.maxDepth = `0–${FULL_PROBE_CAPS.maxDepth} (0 = default ${FULL_PROBE_DEFAULTS.depth})`;
+  if (
+    !Number.isInteger(f.maxDepth) ||
+    f.maxDepth < 0 ||
+    f.maxDepth > FULL_PROBE_CAPS.maxDepth
+  ) {
+    out.maxDepth = `Whole number 0–${FULL_PROBE_CAPS.maxDepth} (0 = default ${FULL_PROBE_DEFAULTS.depth})`;
   }
-  if (f.rps < 0 || f.rps > FULL_PROBE_CAPS.maxRPS) {
-    out.rps = `0–${FULL_PROBE_CAPS.maxRPS} (0 = default ${FULL_PROBE_DEFAULTS.rps})`;
+  if (
+    !Number.isInteger(f.rps) ||
+    f.rps < 0 ||
+    f.rps > FULL_PROBE_CAPS.maxRPS
+  ) {
+    out.rps = `Whole number 0–${FULL_PROBE_CAPS.maxRPS} (0 = default ${FULL_PROBE_DEFAULTS.rps})`;
   }
-  if (f.concurrency < 0 || f.concurrency > FULL_PROBE_CAPS.maxConcurrency) {
-    out.concurrency = `0–${FULL_PROBE_CAPS.maxConcurrency} (0 = derive from rps)`;
+  if (
+    !Number.isInteger(f.concurrency) ||
+    f.concurrency < 0 ||
+    f.concurrency > FULL_PROBE_CAPS.maxConcurrency
+  ) {
+    out.concurrency = `Whole number 0–${FULL_PROBE_CAPS.maxConcurrency} (0 = derive from rps)`;
   }
   return out;
 }
@@ -90,6 +110,23 @@ export function buildFullProbeRequest(f: FullProbeFields): FullProbeRunRequest {
  *  partial row) is not "running" — polling it would never end. */
 export function fullProbeRunning(j: FullProbeJob | undefined): boolean {
   return j?.state === "running";
+}
+
+/** How often the live card re-reads a running job. The engine snapshots
+ *  about once a second, so faster polling would only re-serve the same
+ *  numbers. */
+export const FULL_PROBE_POLL_MS = 1_500;
+
+/** Cap on the error-retry backoff: a long outage must not hammer the
+ *  engine, but the chain must keep retrying — one transient blip stopping
+ *  it would freeze the live card until a manual watch click. */
+export const FULL_PROBE_POLL_MAX_MS = 12_000;
+
+/** Delay before re-polling after `failures` consecutive errors: doubles
+ *  from the normal cadence, capped at FULL_PROBE_POLL_MAX_MS. */
+export function fullProbePollDelay(failures: number): number {
+  const n = Math.max(0, Math.floor(failures));
+  return Math.min(FULL_PROBE_POLL_MS * 2 ** n, FULL_PROBE_POLL_MAX_MS);
 }
 
 /** The fastest successful path per depth, depth ascending — the browser's

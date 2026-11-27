@@ -48,6 +48,11 @@ interface SdkContextValue {
   goose: Goose;
   connection: Connection;
   setConnection: (c: Connection) => void;
+  /** Changes only when the engine URL changes — a reconnect or token
+   *  change to the same engine keeps the value, so panels can hold
+   *  engine-scoped state (a pinned job watch, in-flight mutation fences)
+   *  across a new client instance without treating it as a new engine. */
+  engineKey: string;
   /** true while a connection change is being verified against the engine */
   connecting: boolean;
   /** last connection error, or null when connected */
@@ -110,9 +115,18 @@ export function SdkProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  // The engine's identity is its URL (trailing slashes are cosmetic — the
+  // SDK strips them); a new client for the same URL is a reconnect, not a
+  // different engine. Memoized on the URL so a token-only change keeps the
+  // key's identity too.
+  const engineKey = useMemo(
+    () => connection.baseUrl.replace(/\/+$/, ""),
+    [connection.baseUrl],
+  );
+
   const value = useMemo(
-    () => ({ goose, connection, setConnection, connecting, connectionError }),
-    [goose, connection, setConnection, connecting, connectionError],
+    () => ({ goose, connection, setConnection, engineKey, connecting, connectionError }),
+    [goose, connection, setConnection, engineKey, connecting, connectionError],
   );
 
   return <SdkContext.Provider value={value}>{children}</SdkContext.Provider>;

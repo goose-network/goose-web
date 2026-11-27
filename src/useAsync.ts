@@ -17,31 +17,41 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[]): AsyncState<T
   // Refetch keeps the previous render at reduced opacity (no skeleton flash):
   // only the first load starts with data === undefined.
   const [tick, setTick] = useState(0);
-  const cancel = useRef(false);
+  // Run sequencing, not per-run cancellation: a response may land only if
+  // no NEWER response has landed yet. Cancelling every superseded run
+  // outright would starve periodic refreshers on a slow link (each tick
+  // kills the previous fetch before it lands, freezing the table); letting
+  // any in-flight run land would let a stale response (e.g. the old
+  // engine's list after a connection switch) overwrite a newer one. The
+  // landed watermark gives both: slow fetches still land, in order, and a
+  // newer result is never clobbered by an older one.
+  const started = useRef(0);
+  const landed = useRef(0);
 
   const run = useCallback(fn, deps);
 
   useEffect(() => {
-    cancel.current = false;
+    const my = ++started.current;
     setLoading(true);
     run()
       .then((v) => {
-        if (!cancel.current) {
+        if (my > landed.current) {
+          landed.current = my;
           setData(v);
           setError(null);
         }
       })
       .catch((err: unknown) => {
-        if (!cancel.current) {
+        if (my > landed.current) {
+          landed.current = my;
           setError(err instanceof Error ? err.message : String(err));
         }
       })
       .finally(() => {
-        if (!cancel.current) setLoading(false);
+        // Only the newest run clears loading; an older run finishing must
+        // not drop the indicator while a newer fetch is still in flight.
+        if (my === started.current) setLoading(false);
       });
-    return () => {
-      cancel.current = true;
-    };
   }, [run, tick]);
 
   const reload = useCallback(() => setTick((t) => t + 1), []);
