@@ -27,6 +27,7 @@ import { ProvidersPage } from "./pages/ProvidersPage";
 import { MetricsPage } from "./pages/MetricsPage";
 import { ExitChecksPage } from "./pages/ExitChecksPage";
 import { ProbesPage } from "./pages/ProbesPage";
+import { FullProbesPage } from "./pages/FullProbesPage";
 
 interface NavItem {
   to: string;
@@ -55,6 +56,7 @@ const NAV: Array<{ label: string; items: NavItem[] }> = [
     items: [
       { to: "/exit-checks", label: "Exit IP", Icon: IconGlobe },
       { to: "/probes", label: "Probe", Icon: IconProbe },
+      { to: "/full-probes", label: "Full probe", Icon: IconProbe },
       { to: "/metrics", label: "Metrics", Icon: IconChart },
     ],
   },
@@ -132,6 +134,7 @@ export function App() {
             <Route path="/providers" element={<ProvidersPage />} />
             <Route path="/exit-checks" element={<ExitChecksPage />} />
             <Route path="/probes" element={<ProbesPage />} />
+            <Route path="/full-probes" element={<FullProbesPage />} />
             <Route path="/metrics" element={<MetricsPage />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
