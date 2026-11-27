@@ -128,6 +128,21 @@ export function PoolsPage() {
       },
     },
     {
+      key: "chains",
+      header: "Chains",
+      render: (p) => {
+        const ids = p.chain_ids ?? [];
+        if (ids.length === 0) return "—";
+        return (
+          <span title={ids.join(", ")}>
+            <span className="pill">{ids.length} chain{ids.length === 1 ? "" : "s"}</span>{" "}
+            <span className="mono">{ids.slice(0, 2).join(", ")}</span>
+            {ids.length > 2 ? ` +${ids.length - 2}` : ""}
+          </span>
+        );
+      },
+    },
+    {
       key: "selector",
       header: "Selector",
       render: (p) => <span className="pill">{p.selector?.type ?? "—"}</span>,
@@ -460,6 +475,22 @@ function PoolForm({
         />
       </FieldGroup>
 
+      {(draft.chain_ids ?? []).length > 0 && (
+        <FieldGroup
+          id="pool-chains"
+          label="Chain members"
+          hint="Read-only: chains a full-probe pool apply put in this pool. They ride every save untouched — editing outbounds above never removes them. Edit them on the Chains page."
+        >
+          <div className="chip-grid">
+            {(draft.chain_ids ?? []).map((c) => (
+              <span key={c} className="chip on mono" aria-disabled="true">
+                {c}
+              </span>
+            ))}
+          </div>
+        </FieldGroup>
+      )}
+
       <KvEditor
         id="pool-selector-params"
         label="Selector params (JSON)"
@@ -662,6 +693,12 @@ function ProtocolRow({
 }
 
 function normalize(p: Pool): Pool {
+  // The spread keeps chain_ids verbatim when the engine sent them: every
+  // form edit spreads the draft too, so a save round-trips the chain members
+  // untouched — editing outbound members must never strip the chains a
+  // full-probe pool apply put there. Absent stays absent: an older engine's
+  // decoder rejects unknown fields, so a pool that never had chains must not
+  // grow an empty key.
   return {
     ...p,
     outbound_ids: p.outbound_ids ?? [],
@@ -669,3 +706,5 @@ function normalize(p: Pool): Pool {
     selector: { ...(p.selector ?? {}), type: p.selector?.type || "random", params: p.selector?.params ?? {} },
   };
 }
+
+export { normalize as normalizePool };

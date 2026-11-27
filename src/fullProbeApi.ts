@@ -8,7 +8,7 @@
 // already live — the same arrangement as runApi.ts.
 
 import { GooseApiError, type Goose } from "@goose-network/goose-sdk";
-import { apiMessage } from "./runApi";
+import { apiMessage, type HTTPProbe } from "./runApi";
 
 /** One successful path (`core.FullProbePath`): the ordered outbound IDs of a
  *  chain that proxied a request to the target. "local" is the implicit first
@@ -80,6 +80,11 @@ export interface FullProbeJob {
   total_attempts?: number;
   startedAt?: string;
   finishedAt?: string;
+  /** The job's durable attempt rows (GET .../results) were pruned — a
+   *  retention budget cut them or the job's row bucket was evicted. The
+   *  attempt counts stay exact; only the row detail is partial. Additive:
+   *  an engine older than per-job attempt storage never sends it. */
+  rows_pruned?: boolean;
 }
 
 /** `POST /api/probes/full` body (`api.fullProbeRunRequest`): the sweep to
@@ -101,16 +106,40 @@ export interface FullProbeRunRequest {
 
 /** `POST /api/probes/full/{id}/inbounds` body (`core.FullProbeApplySpec`):
  *  which successful paths to build and how to name/listen them. An empty
- *  object applies the fastest path per depth. */
+ *  object applies the fastest path per depth.
+ *
+ *  The mode/pool_id/selector fields are additive: the DEFAULT mode omits
+ *  them entirely (buildApplySpec enforces that), so a request an older
+ *  engine can still read stays byte-identical — its JSON decoder rejects
+ *  unknown fields outright, and sending `mode: ""` would 400 a build that
+ *  would happily serve the default apply. */
 export interface FullProbeApplySpec {
   paths?: string[][];
   protocol?: string;
   listen_prefix?: string;
   port?: number;
   id_prefix?: string;
+  /** "" / "inbounds" = one inbound per path (the default, omitted on the
+   *  wire); "pool" = one pool load-balancing over the proved paths behind
+   *  a single inbound. */
+  mode?: string;
+  /** pool mode only: the generated pool's id; empty means "<id_prefix>-pool" */
+  pool_id?: string;
+  /** pool mode only: the pool's selection strategy; nil means roundrobin */
+  selector?: FullProbeSelectorSpec;
 }
 
-/** One generated chain + inbound pair (`core.FullProbeApplyResult`). */
+/** The apply request's selector (`core.FullProbeSelectorSpec`) — a core-local
+ *  mirror of config.SelectorSpec, since core cannot import config. */
+export interface FullProbeSelectorSpec {
+  /** "random" | "roundrobin" | "sticky" | "leastlatency" */
+  type: string;
+  params?: Record<string, unknown>;
+}
+
+/** One generated chain + inbound pair (`core.FullProbeApplyResult`). In pool
+ *  mode each entry names a member chain and the inbound fields are empty —
+ *  the one listener is described by the response's top-level fields. */
 export interface FullProbeApplyResult {
   chain_id?: string;
   inbound_id?: string;
@@ -119,10 +148,21 @@ export interface FullProbeApplyResult {
   path?: FullProbePath;
 }
 
-/** The 201 body of the apply endpoint. */
+/** The 201 body of the apply endpoint. The pool-mode fields are additive
+ *  (omitempty on the engine): an inbounds-mode answer never carries them. */
 export interface FullProbeApplyResponse {
   job_id?: string;
   results?: FullProbeApplyResult[] | null;
+  /** pool mode only: the generated pool */
+  pool_id?: string;
+  /** pool mode only: the single inbound routed through the pool */
+  inbound_id?: string;
+  /** pool mode only: that inbound's listen address */
+  listen?: string;
+  /** pool mode only: that inbound's listener protocol */
+  protocol?: string;
+  /** pool mode only: the pool's selection strategy */
+  selector?: FullProbeSelectorSpec;
 }
 
 async function friendly<T>(p: Promise<T>): Promise<T> {
@@ -141,6 +181,13 @@ export function fullProbeJobGone(err: unknown): boolean {
   return err instanceof GooseApiError && err.status === 404;
 }
 
+/** The missing-job wording, shared by every 404 rewrap below and the
+ *  results card's gone notice — one string so the parent's notice and the
+ *  card's can never drift apart. */
+export function fullProbeGoneMessage(id: string): string {
+  return `No full-probe job "${id}" on this engine — it was pruned from history or lost in a restart.`;
+}
+
 /** Like friendly, but for /api/probes/full/{id} routes: a 404 there means
  *  the job is missing, so it keeps the GooseApiError (status intact for
  *  fullProbeJobGone) with job-specific wording rather than apiMessage's
@@ -153,7 +200,7 @@ async function friendlyJob<T>(id: string, p: Promise<T>): Promise<T> {
       throw new GooseApiError(
         404,
         (err as GooseApiError).body,
-        `No full-probe job "${id}" on this engine — it was pruned from history or lost in a restart.`,
+        fullProbeGoneMessage(id),
       );
     }
     throw new Error(apiMessage(err));
@@ -215,18 +262,154 @@ export async function cancelFullProbe(
 
 /** Turns a finished job's successful paths into chains + inbounds. `{}`
  *  applies the fastest successful path per depth — local→A, local→A→C,
- *  local→A→C→E, ... — one inbound per path. */
+ *  local→A→C→E, ... — one inbound per path. `mode: "pool"` instead builds
+ *  one pool over the proved paths behind a single inbound (see
+ *  buildApplySpec, which keeps the default mode's body byte-identical).
+ *
+ *  An older engine's decoder rejects unknown fields outright, so pool mode
+ *  against it comes back 400 "unknown field" — reworded here as the upgrade
+ *  it actually is (status kept, so callers can still classify it). */
 export async function applyFullProbe(
   goose: Goose,
   id: string,
   spec: FullProbeApplySpec = {},
 ): Promise<FullProbeApplyResponse> {
-  return friendlyJob(
-    id,
-    goose.client.send<FullProbeApplyResponse>(
+  try {
+    return await goose.client.send<FullProbeApplyResponse>(
       "POST",
       `/api/probes/full/${encodeURIComponent(id)}/inbounds`,
       spec,
-    ),
-  );
+    );
+  } catch (err) {
+    if (fullProbeJobGone(err)) {
+      throw new GooseApiError(
+        404,
+        (err as GooseApiError).body,
+        fullProbeGoneMessage(id),
+      );
+    }
+    if (
+      spec.mode === "pool" &&
+      err instanceof GooseApiError &&
+      err.status === 400 &&
+      /unknown field/i.test(err.message)
+    ) {
+      throw new GooseApiError(
+        400,
+        err.body,
+        "This engine does not understand pool-mode apply (mode/pool_id/selector) — it needs a newer engine build. Switch to \"Inbound per path\" to create listeners on this engine.",
+      );
+    }
+    throw new Error(apiMessage(err));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Attempt results: every issued attempt of one job, newest first
+// ---------------------------------------------------------------------------
+
+/** `GET /api/probes/full/{id}/results` query options. Filters narrow
+ *  SERVER-side (the engine walks the job's row bucket); `before` is the
+ *  pagination cursor — the previous page's last row id, returning only rows
+ *  strictly older than it. Empty strings and zero numbers mean "unset" and
+ *  are omitted from the query (depth 0 is not a depth the engine stores). */
+export interface FullProbeResultsQuery {
+  /** page size; the engine defaults 200 and caps 10000 */
+  n?: number;
+  /** row id cursor: only rows strictly older than this id */
+  before?: string;
+  /** "success" | "failed" */
+  outcome?: string;
+  /** exact chain length (>= 1) */
+  depth?: number;
+  /** exact failure reason slug */
+  reason?: string;
+  /** exact hop-join route ("a>b") */
+  route?: string;
+  /** an outbound at any position of the route */
+  hop?: string;
+  /** the route's final outbound */
+  last_hop?: string;
+}
+
+/** The query suffix for the results endpoint — "" when nothing is set, so
+ *  the bare URL keeps the engine's own defaults. Pure: vitest asserts the
+ *  exact wire form (URLSearchParams encodes, and unset fields must not
+ *  travel as empty strings — an empty `outcome=` is still a filter key to
+ *  a stricter future engine). */
+export function buildResultsQuery(opts: FullProbeResultsQuery): string {
+  const q = new URLSearchParams();
+  if (opts.n !== undefined && opts.n > 0) q.set("n", String(opts.n));
+  if (opts.before !== undefined && opts.before !== "") q.set("before", opts.before);
+  if (opts.outcome !== undefined && opts.outcome !== "") q.set("outcome", opts.outcome);
+  if (opts.depth !== undefined && opts.depth > 0) q.set("depth", String(opts.depth));
+  if (opts.reason !== undefined && opts.reason !== "") q.set("reason", opts.reason);
+  if (opts.route !== undefined && opts.route !== "") q.set("route", opts.route);
+  if (opts.hop !== undefined && opts.hop !== "") q.set("hop", opts.hop);
+  if (opts.last_hop !== undefined && opts.last_hop !== "") q.set("last_hop", opts.last_hop);
+  const s = q.toString();
+  return s === "" ? "" : `?${s}`;
+}
+
+/** True when a results call failed with 404. Ambiguous by itself: either the
+ *  ENGINE predates the per-job results endpoint, or the JOB was evicted from
+ *  the 64-job history (a terminal job whose parent poll stopped can be pushed
+ *  out by newer sweeps; a restart does NOT lose finished jobs — history is
+ *  persisted). The page must not read this as a capability answer on its
+ *  own: classifyFullProbeResults404 disambiguates against the job snapshot,
+ *  or an evicted job on a capable engine permanently latches it "old". */
+export function fullProbeResultsMissing(err: unknown): boolean {
+  return err instanceof GooseApiError && err.status === 404;
+}
+
+/** What a results-route 404 actually means, once the job snapshot has been
+ *  consulted. "gone": the job left the engine's history — stop following it,
+ *  never a capability verdict. "unsupported": the snapshot loads but /results
+ *  404s — the engine predates the endpoint (old engines serve the snapshot).
+ *  "transient": the snapshot could not be read (network blip, 5xx) — nothing
+ *  is proven, retry later rather than latch either verdict. */
+export type FullProbeResults404Kind = "gone" | "unsupported" | "transient";
+
+/** Disambiguates a results-route 404 BEFORE any capability latch: fetch the
+ *  job snapshot (GET /api/probes/full/{id} — the same route the parent poll
+ *  uses). Snapshot 404 → the job is gone from history, not an old engine.
+ *  Snapshot loads → the endpoint truly is missing. Snapshot unreadable →
+ *  transient; the caller retries instead of guessing. Pure orchestration
+ *  over the two calls, so vitest pins every classification. */
+export async function classifyFullProbeResults404(
+  goose: Goose,
+  id: string,
+): Promise<FullProbeResults404Kind> {
+  try {
+    await getFullProbe(goose, id);
+    return "unsupported";
+  } catch (err) {
+    return fullProbeJobGone(err) ? "gone" : "transient";
+  }
+}
+
+/** One job's durable attempt rows, newest first — every issued attempt,
+ *  success and failure alike, in the same model as GET /api/probes/results.
+ *  A known job with no (or pruned) rows answers 200 []; an unknown job — or
+ *  an engine without this endpoint — answers 404, which keeps its status
+ *  (fullProbeResultsMissing) and apiMessage's "needs a newer engine build"
+ *  wording: the page distinguishes the two via classifyFullProbeResults404
+ *  (does the job snapshot load?), not by this call's message. */
+export async function listFullProbeResults(
+  goose: Goose,
+  id: string,
+  opts: FullProbeResultsQuery = {},
+): Promise<HTTPProbe[]> {
+  const suffix = buildResultsQuery(opts);
+  try {
+    const res = await goose.client.get<HTTPProbe[] | null>(
+      `/api/probes/full/${encodeURIComponent(id)}/results${suffix}`,
+    );
+    return res ?? [];
+  } catch (err) {
+    if (err instanceof GooseApiError) {
+      throw new GooseApiError(err.status, err.body, apiMessage(err));
+    }
+    throw new Error(apiMessage(err));
+  }
 }

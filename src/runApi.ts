@@ -163,6 +163,16 @@ export interface HTTPProbe {
    *  from an engine older than path observation and on a job the round's budget
    *  canceled before it ran. */
   path?: PathGraph;
+  /** the full-probe job this attempt belongs to (`core.HTTPProbe.FullProbeID`).
+   *  Set only on rows served by GET /api/probes/full/{id}/results — the shared
+   *  probes bucket keeps only full-probe SUCCESSES and never sends this, so a
+   *  row from the history below has it absent. */
+  full_probe_id?: string;
+  /** the chain length this attempt probed (`core.HTTPProbe.Depth`): 1 for a
+   *  single outbound, 2 for a rescued pair, ... Set only alongside
+   *  full_probe_id; absent (not 0) on every other row and on engines older
+   *  than per-job attempt storage. */
+  depth?: number;
 }
 
 /** `POST /api/probes/run` body (`api.probeRunRequest`). */
