@@ -1070,14 +1070,21 @@ await test("a pool round that fails over numbers every dial it made", async () =
   );
   await history.locator("#probe-history-route").selectOption(failover.ref);
   const hrow = history.locator("tbody tr", { hasText: target }).first();
-  await hrow.locator(".path-strip").waitFor({ timeout: 10_000 });
+  // The path CELL, not the row: History shares probeResultColumns with the
+  // results views, so the Response column's folded <details class="probe-detail">
+  // carries a second copy of the same strip. Closed details hide it from
+  // innerText but NOT from locator resolution — every path assertion below
+  // (chip count, leg pane, node table) must scope to td.path or it counts both
+  // copies and fails strict mode.
+  const hcell = hrow.locator("td.path");
+  await hcell.locator(".path-strip").waitFor({ timeout: 10_000 });
 
   // The strip draws ONE attempt, not both: buildPathView takes the leg that
   // actually carried the request onward and, when none did, the LAST one — the
   // furthest attempt the row got to (pathGraph.ts, pinned by pathGraph.test.ts's
   // "takes the last attempt when none of them succeeded"). So attempt 2 is the
   // chip and attempt 1 is pane material.
-  const chips = hrow.locator(".path-strip .path-node.kind-proxy");
+  const chips = hcell.locator(".path-strip .path-node.kind-proxy");
   assert.equal(
     await chips.count(),
     1,
@@ -1099,16 +1106,16 @@ await test("a pool round that fails over numbers every dial it made", async () =
   // The pane's headline counts the dials before it lists them, which is the only
   // place a reader learns the pool tried twice without opening anything.
   assert.match(
-    await hrow.locator(".path-detail summary").innerText(),
+    await hcell.locator(".path-detail summary").innerText(),
     new RegExp(
       `${failover.built.length} legs · ${failover.built.length} failed`,
     ),
     "the pane's headline did not count every dial",
   );
-  await hrow.locator(".path-detail summary").click();
-  await hrow.locator(".path-legs .path-leg").first().waitFor({ timeout: 5_000 });
+  await hcell.locator(".path-detail summary").click();
+  await hcell.locator(".path-legs .path-leg").first().waitFor({ timeout: 5_000 });
 
-  const legs = hrow.locator(".path-legs .path-leg");
+  const legs = hcell.locator(".path-legs .path-leg");
   assert.equal(
     await legs.count(),
     failover.built.length,
@@ -1117,7 +1124,7 @@ await test("a pool round that fails over numbers every dial it made", async () =
   // Every attempt but the strip's stays in the pane, marked off-strip in the
   // class as well as in words — colour is not the only signal, and neither is
   // the strip.
-  const offStrip = hrow.locator(".path-legs .path-leg.off-strip");
+  const offStrip = hcell.locator(".path-legs .path-leg.off-strip");
   assert.equal(
     await offStrip.count(),
     failover.built.length - 1,
@@ -1145,12 +1152,12 @@ await test("a pool round that fails over numbers every dial it made", async () =
   // it has to list every node the engine recorded — including the target no leg
   // ever reached — and number the ones that were one of several.
   assert.equal(
-    await hrow.locator(".path-nodes tbody tr").count(),
+    await hcell.locator(".path-nodes tbody tr").count(),
     nodes.length,
     "the node table drew a row for something the engine did not record, or dropped one it did",
   );
   assert.deepEqual(
-    (await hrow.locator(".path-nodes tbody tr td.num").allInnerTexts())
+    (await hcell.locator(".path-nodes tbody tr td.num").allInnerTexts())
       .filter((n) => n !== "—")
       .sort(),
     failover.built.map((_, i) => String(i + 1)),
