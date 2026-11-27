@@ -60,7 +60,7 @@ export function ProvidersPage() {
             : null,
         upstream: upstreamRoute(
           d.upstream_proxy,
-          "Route is empty, “direct”, “access”, “outbound:<id>”, “pool:<id>”, or a bare pool/outbound id",
+          "Route is empty, “direct”, “outbound:<id>”, “pool:<id>”, or a bare pool/outbound id",
         ),
       }),
   });
@@ -237,7 +237,7 @@ function urlOf(p: ProviderSpec): string {
 
 /**
  * upstreamOptions builds the upstream-route picker's choices: the special
- * routes the engine knows by name, then every pool and outbound as an explicit
+ * route the engine knows by name, then every pool and outbound as an explicit
  * prefixed reference, then the stored value if it names none of them.
  *
  * Unlike a chain layer (a BARE id resolved pool-first), an upstream route spells
@@ -261,7 +261,6 @@ export function upstreamOptions(
       label: "Special",
       options: [
         { value: "direct", label: "direct — the engine host's network" },
-        { value: "access", label: "access — dial direct first, then the access pool" },
       ],
     },
   ];
@@ -276,7 +275,6 @@ export function upstreamOptions(
   }
   const known = new Set<string>([
     "direct",
-    "access",
     ...pools.map((id) => `pool:${id}`),
     ...outbounds.map((id) => `outbound:${id}`),
   ]);
@@ -378,7 +376,7 @@ function ProviderForm({
           onChange={(upstream_proxy) =>
             set({ upstream_proxy: upstream_proxy.trim() })
           }
-          hint="Routes this provider's own proxy-list fetches (a subscription URL, server list or directory) through an engine route instead of the engine host's network — for lists the host cannot reach directly. The outbounds' own tunnel and relay dials never ride it. Pick a route below, or type one: outbound:<id>, pool:<id>, a bare pool/outbound id, or “access” (dial direct first, then the access pool). Blank = direct."
+          hint="Routes this provider's own proxy-list fetches (a subscription URL, server list or directory) through an engine route instead of the engine host's network — for lists the host cannot reach directly. The outbounds' own tunnel and relay dials never ride it. Pick a route below, or type one: outbound:<id>, pool:<id>, or a bare pool/outbound id. Blank = direct."
         />
       </div>
       <PluginHelp plugin={plugin} />

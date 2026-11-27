@@ -53,7 +53,6 @@ describe("upstreamRoute", () => {
 
   it("accepts every route form", () => {
     expect(upstreamRoute("direct", MSG)).toBeNull();
-    expect(upstreamRoute("access", MSG)).toBeNull();
     expect(upstreamRoute("outbound:my-proxy", MSG)).toBeNull();
     expect(upstreamRoute("pool:relays", MSG)).toBeNull();
     // Bare ids resolve as a pool first, else an outbound.

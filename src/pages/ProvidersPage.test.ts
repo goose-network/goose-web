@@ -91,10 +91,11 @@ describe("upstreamOptions", () => {
   const values = (groups: ReturnType<typeof upstreamOptions>) =>
     groups.flatMap((g) => g.options.map((o) => o.value));
 
-  it("always offers the special routes", () => {
-    const v = values(upstreamOptions([], [], ""));
-    expect(v).toContain("direct");
-    expect(v).toContain("access");
+  it("offers exactly one special route: direct", () => {
+    const groups = upstreamOptions([], [], "");
+    expect(groups.find((g) => g.label === "Special")?.options).toEqual([
+      { value: "direct", label: "direct — the engine host's network" },
+    ]);
   });
 
   it("lists pools and outbounds as explicit prefixed refs, sorted", () => {
@@ -125,7 +126,7 @@ describe("upstreamOptions", () => {
   });
 
   it("does not re-list a stored value already among the choices", () => {
-    for (const current of ["direct", "access", "pool:fast", "outbound:relay-a", ""]) {
+    for (const current of ["direct", "pool:fast", "outbound:relay-a", ""]) {
       const groups = upstreamOptions(["fast"], ["relay-a"], current);
       expect(groups.some((g) => g.label === "Current")).toBe(false);
     }

@@ -208,11 +208,11 @@ describe("visibleOptions", () => {
   });
 
   it("offers a Use row for typed text that names no choice, only when allowed", () => {
-    const allowed = visibleOptions(GROUPS, "access", undefined, "all", false, true, "(choose)");
+    const allowed = visibleOptions(GROUPS, "ghost-x", undefined, "all", false, true, "(choose)");
     const custom = allowed.find((o) => o.kind === "custom");
-    expect(custom).toEqual({ value: "access", label: "Use “access”", group: "", kind: "custom" });
+    expect(custom).toEqual({ value: "ghost-x", label: "Use “ghost-x”", group: "", kind: "custom" });
     // not allowed → no custom row
-    const denied = visibleOptions(GROUPS, "access", undefined, "all", false, false, "(choose)");
+    const denied = visibleOptions(GROUPS, "ghost-x", undefined, "all", false, false, "(choose)");
     expect(denied.some((o) => o.kind === "custom")).toBe(false);
   });
 
@@ -254,6 +254,6 @@ describe("displayLabel", () => {
   });
   it("shows the raw value when nothing offers it (a ghost or custom route)", () => {
     expect(displayLabel("gone-9", GROUPS, "(choose)")).toBe("gone-9");
-    expect(displayLabel("access", GROUPS, "(choose)")).toBe("access");
+    expect(displayLabel("ghost-x", GROUPS, "(choose)")).toBe("ghost-x");
   });
 });

@@ -34,7 +34,7 @@ export function httpUrl(value: string | undefined, message: string): string | nu
 
 /**
  * upstream_proxy route on a provider spec: empty (fetch direct, the default),
- * "direct", "access", "outbound:<id>", "pool:<id>", or a bare pool/outbound
+ * "direct", "outbound:<id>", "pool:<id>", or a bare pool/outbound
  * id. Whitespace anywhere, or a prefix with no id after it, are the typos
  * worth catching in the form; the engine resolves the rest.
  */
