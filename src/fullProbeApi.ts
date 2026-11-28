@@ -40,7 +40,9 @@ export interface FullProbeLevel {
   candidates?: number;
   /** planned attempt count after the fan-out caps */
   total?: number;
-  /** pairs the caps (or a cancel) cut */
+  /** prefix×candidate pairs cut without an attempt — fan-out caps, a
+   *  cancel, or the settling tail's expired bound (depth-1 pairs are
+   *  single outbounds) */
   skipped?: number;
   done?: number;
   success?: number;
@@ -66,6 +68,11 @@ export interface FullProbeSpec {
   max_attempts_per_level?: number;
   max_paths_per_level?: number;
   max_total_attempts?: number;
+  /** Settling-tail bound in seconds: after the sweep, keep probing outbounds
+   *  that register late (depth 1) until the fleet is quiet or this expires.
+   *  0/unset = engine default (600); -1 = opt out (one final pass still runs).
+   *  Additive: an engine older than the settling tail never sends it. */
+  catchup_seconds?: number;
 }
 
 /** One full active probing job (`core.FullProbeJob`). */
@@ -102,6 +109,11 @@ export interface FullProbeRunRequest {
   max_attempts_per_level?: number;
   max_paths_per_level?: number;
   max_total_attempts?: number;
+  /** Settling-tail bound in seconds (engine default 600 when omitted; -1
+   *  opts out, one final pass still runs). Additive: OMIT it for engines
+   *  older than the settling tail — their JSON decoder rejects unknown
+   *  fields outright (400), it does not ignore them. */
+  catchup_seconds?: number;
 }
 
 /** `POST /api/probes/full/{id}/inbounds` body (`core.FullProbeApplySpec`):

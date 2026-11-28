@@ -548,6 +548,15 @@ export function FullProbesPage() {
               {progress.pct}%)
             </p>
           )}
+          {fullProbeRunning(live) && (live.spec?.catchup_seconds ?? 0) > 0 && (
+            <p className="page-sub">
+              Catch-up bound: {live.spec?.catchup_seconds}s. After the sweep,
+              engines with providers keep probing outbounds that register late
+              (depth 1) until the fleet goes quiet or this bound expires —
+              progress can read 100% while the job stays running. Without
+              providers a single final pass covers late arrivals instead.
+            </p>
+          )}
           {levels.length > 0 && (
             <table className="data">
               <caption className="sr-only">Per-depth progress</caption>
@@ -579,40 +588,46 @@ export function FullProbesPage() {
             </table>
           )}
 
-          {paths.length > 0 && (
+          {/* The per-attempt results view below (filters + paging over the
+              job's durable rows) is the one place every attempt is studied on
+              engines that serve it, so the old snapshot summaries are gone
+              there. Engines without the endpoint still get them: the snapshot
+              is their only pre-apply view of which paths were proved. */}
+          {resultsCap === "old" && (
             <>
-              <h3 className="card-sub">Proved paths</h3>
-              <ul>
-                {paths.map((p, i) => (
-                  <li key={i} className="mono">
-                    {pathLabel(p)}{" "}
-                    <span className="pill ok">
-                      {formatDuration(p.latency)}
-                      {p.status !== undefined && p.status > 0
-                        ? ` · ${p.status}`
-                        : ""}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
-
-          {live.levels?.some((l) => (l.failed_items?.length ?? 0) > 0) && (
-            <>
-              <h3 className="card-sub">Failed items (retried behind the successes)</h3>
-              <ul>
-                {(live.levels ?? []).flatMap((l) =>
-                  (l.failed_items ?? []).map((fi) => (
-                    <li key={`${l.depth}-${fi.id}`} className="mono">
-                      depth {l.depth}: {fi.id} ×{fi.count}
-                      {fi.reason !== undefined && fi.reason !== ""
-                        ? ` — ${fi.reason}`
-                        : ""}
-                    </li>
-                  )),
-                )}
-              </ul>
+              {(live?.levels ?? []).some((l) => (l.success_paths?.length ?? 0) > 0) && (
+                <>
+                  <h3 className="card-sub">Proved paths</h3>
+                  <ul>
+                    {(live?.levels ?? []).flatMap((l) =>
+                      (l.success_paths ?? []).map((p, i) => (
+                        <li key={`${l.depth}-${i}`} className="mono">
+                          {pathLabel(p)}{" "}
+                          <span className="pill ok">
+                            {formatDuration(p.latency)}
+                            {p.status !== undefined && p.status > 0 ? ` · ${p.status}` : ""}
+                          </span>
+                        </li>
+                      )),
+                    )}
+                  </ul>
+                </>
+              )}
+              {(live?.levels ?? []).some((l) => (l.failed_items?.length ?? 0) > 0) && (
+                <>
+                  <h3 className="card-sub">Failed items (retried behind the successes)</h3>
+                  <ul>
+                    {(live?.levels ?? []).flatMap((l) =>
+                      (l.failed_items ?? []).map((fi) => (
+                        <li key={`${l.depth}-${fi.id}`} className="mono">
+                          depth {l.depth}: {fi.id} ×{fi.count}
+                          {fi.reason !== undefined && fi.reason !== "" ? ` — ${fi.reason}` : ""}
+                        </li>
+                      )),
+                    )}
+                  </ul>
+                </>
+              )}
             </>
           )}
 
@@ -1212,8 +1227,8 @@ function AttemptResultsCard({
         </div>
         <Notice kind="info">
           This engine has no per-job attempt results endpoint — it needs a
-          newer engine build. The sweep's progress and proved paths above are
-          unaffected.
+          newer engine build. The sweep's progress and the proved-path /
+          failed-item summaries above are unaffected.
         </Notice>
         {/* The latch must be recoverable without a remount: an engine
             upgraded while the page is open answers the next probe, and the
